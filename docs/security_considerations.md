@@ -1,19 +1,21 @@
 # Security Considerations
 
-!!!warning "Deprecation notice"
-    This page is now deprecated and serves as an archive only. For up-to-date
-    information, please have a look at our
-    [security policy](https://github.com/argoproj/argo-cd/security/policy) and
-    [published security advisories](https://github.com/argoproj/argo-cd/security/advisories).
+> [!WARNING]
+> **Deprecation notice**
+>
+> This page is now deprecated and serves as an archive only. For up-to-date
+> information, please have a look at our
+> [security policy](https://github.com/argoproj/argo-cd/security/policy) and
+> [published security advisories](https://github.com/argoproj/argo-cd/security/advisories).
 
 As a deployment tool, Argo CD needs to have production access which makes security a very important topic.
-The Argoproj team takes security very seriously and continuously working on improving it. Learn more about security
+The Argoproj team takes security very seriously and is continuously working on improving it. Learn more about security
 related features in [Security](./operator-manual/security.md) section.
 
 ## Overview of past and current issues
 
 The following table gives a general overview about past and present issues known
-to the ArgoCD project. See in the [Known Issues](#known-issues-and-workarounds)
+to the Argo CD project. See in the [Known Issues](#known-issues-and-workarounds)
 section if there is a work-around available if you cannot update or if there is
 no fix yet.
 
@@ -25,12 +27,12 @@ no fix yet.
 |2020-04-08|[CVE-2020-11576](https://nvd.nist.gov/vuln/detail/CVE-2020-11576)|User Enumeration|Medium|v1.5.0|v1.5.1|
 |2020-04-08|[CVE-2020-8826](https://nvd.nist.gov/vuln/detail/CVE-2020-8826)|Session-fixation|High|all|n/a|
 |2020-04-08|[CVE-2020-8827](https://nvd.nist.gov/vuln/detail/CVE-2020-8827)|Insufficient anti-automation/anti-brute force|High|all <= 1.5.3|v1.5.3|
-|2020-04-08|[CVE-2020-8828](https://nvd.nist.gov/vuln/detail/CVE-2020-8828)|Insecure default administrative password|High|all|n/a|
+|2020-04-08|[CVE-2020-8828](https://nvd.nist.gov/vuln/detail/CVE-2020-8828)|Insecure default administrative password|High|all <= 1.8.0|1.8.0|
 |2020-04-08|[CVE-2018-21034](https://nvd.nist.gov/vuln/detail/CVE-2018-21034)|Sensitive Information Disclosure|Medium|all <= v1.5.0|v1.5.0|
 
 ## Known Issues And Workarounds
 
-A recent security audit (thanks a lot to [Matt Hamilton](https://github.com/Eriner) of [https://soluble.ai](https://soluble.ai) )
+A recent security audit (thanks a lot to [Matt Hamilton](https://github.com/Eriner) of Soluble AI (acquired by https://www.fortinet.com) )
 has revealed several limitations in Argo CD which could compromise security.
 Most of the issues are related to the built-in user management implementation.
 
@@ -45,7 +47,7 @@ Most of the issues are related to the built-in user management implementation.
 **Details:**
 
 PyYAML library susceptible to arbitrary code execution when it processes untrusted YAML files.
-We do not believe ArgoCD is affected by this vulnerability, because the impact of CVE-2020-1747 and CVE-2020-14343 is limited to usage of awscli.
+We do not believe Argo CD is affected by this vulnerability, because the impact of CVE-2020-1747 and CVE-2020-14343 is limited to usage of awscli.
 The `awscli` only used for AWS IAM authentication, and the endpoint is the AWS API.
 
 ### CVE-2020-5260 - Possible Git credential leak
@@ -58,13 +60,13 @@ The `awscli` only used for AWS IAM authentication, and the endpoint is the AWS A
 
 **Details:**
 
-ArgoCD relies on Git for many of its operations. The Git project released a
+Argo CD relies on Git for many of its operations. The Git project released a
 [security advisory](https://github.com/git/git/security/advisories/GHSA-qm7j-c969-7j4q)
 on 2020-04-14, describing a serious vulnerability in Git which can lead to credential
 leakage through credential helpers by feeding malicious URLs to the `git clone`
 operation.
 
-We do not believe ArgoCD is affected by this vulnerability, because ArgoCD does neither
+We do not believe Argo CD is affected by this vulnerability, because ArgoCD does neither
 make use of Git credential helpers nor does it use `git clone` for repository operations.
 However, we do not know whether our users might have configured Git credential helpers on
 their own and chose to release new images which contain the bug fix for Git.
@@ -79,7 +81,7 @@ When you are running `v1.4.x`, you can upgrade to `v1.4.3` by simply changing th
 tags for `argocd-server`, `argocd-repo-server` and `argocd-controller` to `v1.4.3`. 
 The `v1.4.3` release does not contain additional functional bug fixes.
 
-Likewise, hen you are running `v1.5.x`, you can upgrade to `v1.5.2` by simply changing
+Likewise, when you are running `v1.5.x`, you can upgrade to `v1.5.2` by simply changing
 the image tags for `argocd-server`, `argocd-repo-server` and `argocd-controller` to `v1.5.2`.
 The `v1.5.2` release does not contain additional functional bug fixes.
 
@@ -105,7 +107,7 @@ Upgrade to ArgoCD v1.5.1 or higher. As a workaround, disable local users and use
 
 |Risk|Reported by|Fix version|Workaround|
 |----|-----------|-----------|----------|
-|High|[Matt Hamilton](https://github.com/Eriner) of [https://soluble.ai](https://soluble.ai)|n/a|Yes|
+|High|[Matt Hamilton](https://github.com/Eriner) of [https://soluble.ai](https://soluble.ai)|1.8.0|Yes|
 
 **Details:**
 
@@ -113,14 +115,14 @@ Argo CD uses the `argocd-server` pod name (ex: `argocd-server-55594fbdb9-ptsf5`)
 
 Kubernetes users able to list pods in the argo namespace are able to retrieve the default password.
 
-Additionally, In most installations, [the Pod name contains a random "trail" of characters](https://github.com/kubernetes/kubernetes/blob/dda530cfb74b157f1d17b97818aa128a9db8e711/staging/src/k8s.io/apiserver/pkg/storage/names/generate.go#L37).
+Additionally, in most installations, [the Pod name contains a random "trail" of characters](https://github.com/kubernetes/kubernetes/blob/dda530cfb74b157f1d17b97818aa128a9db8e711/staging/src/k8s.io/apiserver/pkg/storage/names/generate.go#L37).
 These characters are generated using [a time-seeded PRNG](https://github.com/kubernetes/apimachinery/blob/master/pkg/util/rand/rand.go#L26) and not a CSPRNG.
 An attacker could use this information in an attempt to deduce the state of the internal PRNG, aiding bruteforce attacks.
 
 **Mitigation and/or workaround:**
 
 The recommended mitigation as described in the user documentation is to use SSO integration. The default admin password
-should only be used for initial configuration and then [disabled](../operator-manual/user-management/#disable-admin-user)
+should only be used for initial configuration and then [disabled](operator-manual/user-management/index.md#disable-admin-user)
 or at least changed to a more secure password.
 
 ### CVE-2020-8827 - Insufficient anti-automation/anti-brute force

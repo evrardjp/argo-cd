@@ -7,13 +7,25 @@ $pods-per-column: 4;
 $max-rows: 5;
 $num-stats: 2;
 
+$pod-age-icon-clr: #ffce25;
+
+.circle-icon {
+    color: $pod-age-icon-clr;
+    font-size: 10px;
+}
+
 .pod-view {
     &__settings {
         align-items: center;
         display: flex;
         margin-bottom: 1em;
         &__section {
-            margin: 0 10px;
+            margin-left: 10px;
+            padding-right: 10px;
+            border-right: 1px solid $argo-color-gray-4;
+            &:last-child {
+                border-right: none;
+            }
         }
     }
 
@@ -31,6 +43,9 @@ $num-stats: 2;
         margin: 10px;
         margin-bottom: 14px !important;
         width: $pod-container-width + 2 * $padding;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
 
         &--large {
             width: $pod-container-width + (2 * $padding) + ($num-stats * ($stat-width + 2 * $gutter)) + 6 * $gutter;
@@ -40,6 +55,7 @@ $num-stats: 2;
             &--header {
                 align-items: center;
                 margin-bottom: 1em;
+                height: 100%;
             }
             &--stats {
                 margin-left: -2 * $gutter;
@@ -53,6 +69,7 @@ $num-stats: 2;
             div {
                 border-radius: 3px;
                 background-color: $argo-color-gray-3;
+                color: $argo-color-gray-7;
                 margin-right: 5px;
                 padding: 3px 5px;
             }
@@ -62,11 +79,26 @@ $num-stats: 2;
             padding: 10px;
             border-radius: 3px;
             background-color: $argo-color-gray-3;
-            div {
+            color: $argo-color-gray-6;
+            max-height: 100px;
+            overflow: auto;
+             &__item {
+                line-height: 20px;
                 display: flex;
-                & div:last-child {
+         
+                &__name {
+                    max-width: 60%;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                &__value {
                     font-weight: 500;
                     margin-left: auto;
+                    max-width: 40%;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
                 }
             }
         }
@@ -82,9 +114,7 @@ $num-stats: 2;
             &__pods {
                 display: flex;
                 flex-wrap: wrap;
-                max-height: $pod-container-height;
                 width: 100%;
-                overflow: auto;
                 background-color: $argo-color-gray-3;
                 border-radius: 3px;
                 padding: $gutter * 2;
@@ -117,7 +147,7 @@ $num-stats: 2;
             &--suspended {
                 background-color: $argo-status-warning-color;
                 &:hover {
-                    background-color: $argo-status-warning-color - #111;
+                    background-color: darken($argo-status-warning-color, 10%);
                 }
             }
             &--running,
@@ -142,7 +172,16 @@ $num-stats: 2;
                     background-color: $argo-color-gray-6;
                 }
             }
-
+            &__new-pod-icon {
+                background: none;
+                color: $pod-age-icon-clr;
+                display: block;
+                left: 20px;
+                margin: 0px;
+                position: absolute;
+                top: -4px;
+                font-size: 10px;
+            }
             &__stat-tooltip {
                 text-align: left;
 
@@ -151,7 +190,6 @@ $num-stats: 2;
                     height: 1em;
                     width: 1em;
                     border-radius: 5px;
-                    
                 }
             }
 
@@ -195,6 +233,17 @@ $num-stats: 2;
                 }
             }
         }
+
+        &__quick-start-actions {
+            display: flex;
+            padding-top: 1em;
+            justify-content: center;
+
+            &.disabled {
+                cursor: default !important;
+                color: $argo-color-gray-3 !important;
+            }
+        }
     }
 
     @media screen and (max-width: map-get($breakpoints, large)) {
@@ -204,7 +253,6 @@ $num-stats: 2;
     }
 
     @media screen and (max-width: map-get($breakpoints, medium)) {
-
         &__node {
             width: 95%;
             &--large {
@@ -215,4 +263,8 @@ $num-stats: 2;
             }
         }
     }
+}
+
+.tippy-content {
+    text-align: left;
 }

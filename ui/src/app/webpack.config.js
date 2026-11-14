@@ -1,74 +1,204 @@
 'use strict;';
 
+const path = require('path');
 const MonacoWebpackPlugin = require('monaco-editor-webpack-plugin');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
-const GoogleFontsPlugin = require('@beyonk/google-fonts-webpack-plugin');
+const {codecovWebpackPlugin} = require("@codecov/webpack-plugin");
+const ReactRefreshWebpackPlugin = require('@pmmmwh/react-refresh-webpack-plugin');
 const webpack = require('webpack');
-const path = require('path');
 
 const isProd = process.env.NODE_ENV === 'production';
-const isOnline = process.env.NODE_ONLINE_ENV === 'online';
 
-console.log(`Bundling in ${isProd ? 'production' : 'development'} mode ${isOnline ? 'online' : 'offline'}...`);
+// React Compiler is on by default; set REACT_COMPILER=0 for a no-compiler
+// baseline build (used for A/B measurement). REACT_COMPILER_LOG=1 turns on the
+// plugin's per-component compiled/bailed report (off in normal/CI builds).
+const reactCompiler = process.env.REACT_COMPILER !== '0';
+const reactCompilerLog = process.env.REACT_COMPILER_LOG === '1';
+
+console.log(`Bundling in ${isProd ? 'production' : 'development'}...`);
+console.log(`React Compiler: ${reactCompiler ? 'enabled' : 'disabled'}${reactCompiler && reactCompilerLog ? ' (logging)' : ''}`);
+
+// argocd-server applies --rootpath/--basehref by rewriting this exact tag (from src/app/index.html) in the
+// embedded index.html (see replaceBaseHRef in server/server.go). Fail the build if the emitted index.html
+// no longer contains it verbatim, e.g. because a minifier rewrote it (#30763).
+const expectedBaseTag = '<base href="/">';
+
+class BaseHrefGuardPlugin {
+    apply(compiler) {
+        compiler.hooks.thisCompilation.tap('BaseHrefGuardPlugin', compilation => {
+            compilation.hooks.processAssets.tap(
+                // REPORT is the last stage, after every minimizer has run.
+                {name: 'BaseHrefGuardPlugin', stage: webpack.Compilation.PROCESS_ASSETS_STAGE_REPORT},
+                () => {
+                    const asset = compilation.getAsset('index.html');
+                    if (!asset || !asset.source.source().toString().includes(expectedBaseTag)) {
+                        compilation.errors.push(new webpack.WebpackError(`index.html must contain ${expectedBaseTag} verbatim so argocd-server can rewrite it for --rootpath/--basehref`));
+                    }
+                }
+            );
+        });
+    }
+}
+
+const esbuildTsxLoader = {
+    loader: 'esbuild-loader',
+    options: {
+        loader: 'tsx',
+        target: 'es2015',
+        tsconfigRaw: require('./tsconfig.json')
+    }
+};
+
+// When enabled, Babel handles the full .tsx transpile (TS + JSX) so the React
+// Compiler analyzes source-equivalent input. esbuild can't be the first pass
+// here: running the compiler on esbuild's type-stripped/JSX-lowered output
+// produces spurious bailouts, so we drop esbuild for .tsx when the compiler is
+// on and let Babel + esbuild's JS minify (later) split the work.
+//
+// Fast Refresh is only wired into this babel-loader path via react-refresh/babel
+// below. The esbuild-loader path (REACT_COMPILER=0) has no Babel plugin support,
+// so Fast Refresh doesn't work there; that's an accepted, documented gap since
+// REACT_COMPILER=0 is an explicit niche A/B-testing flag.
+const tsxRule = reactCompiler
+    ? {
+          test: /\.tsx?$/,
+          loader: 'babel-loader',
+          options: {
+              babelrc: false,
+              configFile: false,
+              // Strip types and transform JSX only; leave ES modules intact so
+              // webpack resolves imports (preset-env's module transform changed
+              // resolution and surfaced spurious missing-dep errors in argo-ui).
+              // esbuild's existing /\.js$/ rule handles final JS lowering.
+              presets: [
+                  ['@babel/preset-react', {runtime: 'automatic'}],
+                  ['@babel/preset-typescript', {isTSX: true, allExtensions: true}]
+              ],
+              plugins: [
+                  ['babel-plugin-react-compiler', {target: '19', ...(reactCompilerLog ? {logger: {logEvent: (filename, event) => console.log(`[react-compiler] ${event.kind} ${filename ?? ''}`)}} : {})}],
+                  ...(!isProd ? ['react-refresh/babel'] : [])
+              ]
+          }
+      }
+    : {
+          test: /\.tsx?$/,
+          ...esbuildTsxLoader
+      };
 
 const proxyConf = {
     target: process.env.ARGOCD_API_URL || 'http://localhost:8080',
-    secure: false
+    secure: false,
+    // Rewrite Host header when proxying to a remote API server (e.g. a hosted Argo CD instance).
+    changeOrigin: !!process.env.ARGOCD_API_URL
 };
 
 const config = {
     entry: './src/app/index.tsx',
     output: {
-        filename: '[name].[hash].js',
-        chunkFilename: '[name].[hash].chunk.js',
-        path: __dirname + '/../../dist/app'
+        filename: '[name].[contenthash].js',
+        chunkFilename: '[name].[contenthash].chunk.js',
+        path: __dirname + '/../../dist/app',
+        // `gitkeep` (and assets/images/resources/.gitkeep) are tracked in git so ui/embed.go
+        // has something to embed before the UI is built; clean would otherwise delete them.
+        clean: {keep: /(^|\/)\.?gitkeep$/}
     },
-
-    devtool: 'source-map',
+    cache: { type: 'filesystem' },
+    optimization: {
+        // Since 5.110, webpack also minifies HTML assets by default. It rewrites index.html with unquoted
+        // attributes (`<base href=/>`), which argocd-server's base href rewrite does not match, so the UI
+        // breaks under --rootpath/--basehref (#30763). html-webpack-plugin already minifies index.html.
+        minimizeOptions: {html: false},
+        runtimeChunk: 'single',
+        splitChunks: {
+            chunks: 'all',
+            cacheGroups: {
+                vendors: {
+                    test: /[\\/]node_modules[\\/]/,
+                    name: 'vendors',
+                    chunks: 'initial',
+                    priority: -5
+                }
+            }
+        }
+    },
 
     resolve: {
         extensions: ['.ts', '.tsx', '.js', '.json'],
-        alias: {react: require.resolve('react')}
+        alias: {
+            'react-form': require.resolve('argo-ui/src/components/form/compat.tsx'),
+        },
+        fallback: { fs: false }
     },
-
+    ignoreWarnings: [{
+        module: new RegExp('/node_modules/argo-ui/.*')
+    }],
     module: {
         rules: [
+            tsxRule,
             {
-                test: /\.tsx?$/,
-                loaders: [...(isProd ? [] : ['react-hot-loader/webpack']), `ts-loader?allowTsInNodeModules=true&configFile=${path.resolve('./src/app/tsconfig.json')}`]
+                enforce: 'pre',
+                test: /\.js$/,
+                exclude: [/node_modules\/react-paginate/, /node_modules\/monaco-editor/],
+                use: ['source-map-loader'],
             },
             {
                 enforce: 'pre',
                 exclude: [/node_modules\/react-paginate/, /node_modules\/monaco-editor/],
                 test: /\.js$/,
-                loaders: [...(isProd ? ['babel-loader'] : []), 'source-map-loader']
+                use: ['esbuild-loader'],
             },
             {
                 test: /\.scss$/,
-                loader: 'style-loader!raw-loader!sass-loader'
+                use: [
+                    'style-loader',
+                    {
+                        loader: 'css-loader',
+                        options: { url: false, import: false }
+                    },
+                    {
+                        loader: 'sass-loader',
+                        options: {
+                            sassOptions: {
+                                includePaths: ['node_modules'],
+                                quietDeps: true,
+                                silenceDeprecations: ['import', 'legacy-js-api', 'global-builtin', 'color-functions']
+                            }
+                        }
+                    }
+                ]
             },
             {
                 test: /\.css$/,
-                loader: 'style-loader!raw-loader'
+                use: [
+                    'style-loader',
+                    {
+                        loader: 'css-loader',
+                        options: { url: false, import: false }
+                    }
+                ]
             }
         ]
-    },
-    node: {
-        fs: 'empty'
     },
     plugins: [
         new webpack.DefinePlugin({
             'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
             'process.env.NODE_ONLINE_ENV': JSON.stringify(process.env.NODE_ONLINE_ENV || 'offline'),
+            'process.platform': JSON.stringify('browser'),
             'SYSTEM_INFO': JSON.stringify({
                 version: process.env.ARGO_VERSION || 'latest'
             })
         }),
-        new HtmlWebpackPlugin({template: 'src/app/index.html'}),
+        new HtmlWebpackPlugin({ template: 'src/app/index.html' }),
+        new BaseHrefGuardPlugin(),
+        new webpack.NormalModuleReplacementPlugin(/^\.\/logs-viewer\/logs-viewer$/, resource => {
+            if (resource.context.endsWith(path.join('argo-ui', 'src', 'components'))) {
+                resource.request = path.resolve(__dirname, 'shims', 'logs-viewer.tsx');
+            }
+        }),
+        new webpack.IgnorePlugin({resourceRegExp: /^\.\/locale$/, contextRegExp: /moment$/}),
         new CopyWebpackPlugin({
-            patterns: [
-                {
+            patterns: [{
                     from: 'src/assets',
                     to: 'assets'
                 },
@@ -81,46 +211,76 @@ const config = {
                     to: 'assets/fonts'
                 },
                 {
-                    from: 'node_modules/redoc/bundles/redoc.standalone.js',
-                    to: 'assets/scripts/redoc.standalone.js'
+                    // consumed by the server-rendered /swagger-ui page; keep in sync with swaggerUIAssetsPath in util/swagger
+                    from: 'node_modules/swagger-ui-dist/{swagger-ui-bundle.js,swagger-ui-standalone-preset.js,swagger-ui.css,favicon-16x16.png,favicon-32x32.png}',
+                    to: 'assets/swagger-ui/[name][ext]'
+                },
+                {
+                    from: 'node_modules/monaco-editor/min/vs/base/browser/ui/codicons/codicon',
+                    to: 'assets/fonts'
                 }
             ]
         }),
         new MonacoWebpackPlugin({
             // https://github.com/microsoft/monaco-editor-webpack-plugin#options
-            languages: ['yaml']
+            languages: ['yaml', 'json']
         }),
-        new GoogleFontsPlugin({
-            // config: https://github.com/beyonk-adventures/google-fonts-webpack-plugin
-            // the upstream version of this plugin is not compatible with webpack 4 so we use this fork
-            fonts: [
-                {
-                    family: 'Heebo',
-                    variants: ['300', '400', '500', '700']
-                }
-            ],
-            // This works by downloading the fonts at bundle time and adding those font-faces to 'fonts.css'.
-            name: 'fonts',
-            filename: 'fonts.css',
-            // local: false in dev prevents pulling fonts on each code change
-            // https://github.com/gabiseabra/google-fonts-webpack-plugin/issues/2
-            local: isOnline,
-            path: 'assets/fonts/google-fonts'
-        })
+        codecovWebpackPlugin({
+            enableBundleAnalysis: process.env.CODECOV_TOKEN !== undefined,
+            bundleName: "argo-cd-ui",
+            uploadToken: process.env.CODECOV_TOKEN,
+        }),
     ],
     devServer: {
+        compress: false,
         historyApiFallback: {
             disableDotRule: true
         },
         port: 4000,
-        host: process.env.ARGOCD_E2E_YARN_HOST || 'localhost',
-        proxy: {
-            '/api': proxyConf,
-            '/auth': proxyConf,
-            '/swagger-ui': proxyConf,
-            '/swagger.json': proxyConf
-        }
+        host: process.env.ARGOCD_E2E_JS_HOST || 'localhost',
+        client: {
+            overlay: {
+                errors: true,
+                warnings: false,
+                // Filter out 401 unauthorized errors from overlay
+                runtimeErrors: (error) => {
+                    if (error.message && error.message.includes('Unauthorized')) {
+                        return false;
+                    }
+                    if (error.message && error.message.includes('401')) {
+                        return false;
+                    }
+                    return true;
+                }
+            }
+        },
+        proxy: [
+            {
+                context: ['/extensions', '/api', '/auth', '/swagger-ui', '/swagger.json', '/download'],
+                ...proxyConf
+            },
+            {
+                context: ['/terminal'],
+                target: process.env.ARGOCD_API_URL || 'ws://localhost:8080',
+                ws: true,
+            }
+        ]
     }
 };
+
+if (isProd) {
+    config.performance = {
+        hints: 'error',
+        // Sizes are raw bytes before gzip.
+        maxEntrypointSize: 1.75 * 1024 * 1024,
+        maxAssetSize: 6 * 1024 * 1024,
+    };
+}
+
+if (!isProd && reactCompiler) {
+    config.plugins.push(new ReactRefreshWebpackPlugin());
+}
+
+config.devtool = isProd ? 'source-map' : 'eval-source-map';
 
 module.exports = config;

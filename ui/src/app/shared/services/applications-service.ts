@@ -1,67 +1,188 @@
 import * as deepMerge from 'deepmerge';
 import {Observable} from 'rxjs';
+import {auditTime, filter, map, repeat, retry, switchMap} from 'rxjs/operators';
 
 import * as models from '../models';
+import {isValidURL} from '../utils';
 import requests from './requests';
+import {getRootPathByApp, isApp} from '../components/app-utils';
+import {namespaceQuery, namespaceQueryKey} from './applications-service.namespace';
 
 interface QueryOptions {
     fields: string[];
     exclude?: boolean;
     selector?: string;
+    appNamespace?: string;
+    names?: string[];
 }
 
-function optionsToSearch(options?: QueryOptions) {
+function optionsToSearch(options?: QueryOptions): {fields?: string; selector: string; appNamespace: string; names?: string[]} {
     if (options) {
-        return {fields: (options.exclude ? '-' : '') + options.fields.join(','), selector: options.selector || ''};
+        const result: {fields?: string; selector: string; appNamespace: string; names?: string[]} = {
+            selector: options.selector || '',
+            appNamespace: options.appNamespace || ''
+        };
+        if (options.fields) {
+            result.fields = (options.exclude ? '-' : '') + options.fields.join(',');
+        }
+        if (options.names) {
+            result.names = options.names;
+        }
+        return result;
     }
-    return {};
+    return {selector: '', appNamespace: ''};
+}
+
+// dropStaleGeneratedAppStatus removes the health and sync (status) fields from the generated
+// Application nodes of an ApplicationSet resource tree.
+//
+// Why this is necessary: the nodes of an ApplicationSet tree are the Applications it generates.
+// Their health/sync values are mirrored from appset.status.resources, which is only refreshed when
+// the ApplicationSet reconciles. With progressive syncs disabled, an owned Application's health/sync
+// change does not trigger an ApplicationSet reconcile at all, so the mirrored values can be stale
+// and out of date compared to the Application's real status. Displaying them would be misleading.
+// Users can open the Application to see its authoritative health/sync status.
+function dropStaleGeneratedAppStatus<T extends {kind?: string; group?: string; status?: models.SyncStatusCode; health?: models.HealthStatus}>(nodes: T[]): T[] {
+    return (nodes || []).map(node => (node.kind === 'Application' && node.group === 'argoproj.io' ? {...node, status: undefined, health: undefined} : node));
+}
+
+function getQuery(projects: string[], isListOfApplications: boolean, options?: QueryOptions): any {
+    if (isListOfApplications) {
+        return {projects, ...optionsToSearch(options)};
+    } else {
+        return {...optionsToSearch(options)};
+    }
 }
 
 export class ApplicationsService {
-    public list(projects: string[], options?: QueryOptions): Promise<models.ApplicationList> {
+    constructor() {}
+
+    public list(projects: string[], objectListKind: string, options?: QueryOptions): Promise<models.AbstractApplicationList> {
+        const isApplication = objectListKind === 'application';
+        const endpoint = isApplication ? '/applications' : '/applicationsets';
         return requests
-            .get('/applications')
-            .query({project: projects, ...optionsToSearch(options)})
-            .then(res => res.body as models.ApplicationList)
+            .get(endpoint)
+            .query(getQuery(projects, isApplication, options))
+            .then(res => {
+                if (isApplication) {
+                    return res.body as models.ApplicationList;
+                } else {
+                    return res.body as models.ApplicationSetList;
+                }
+            })
             .then(list => {
-                list.items = (list.items || []).map(app => this.parseAppFields(app));
+                list.items = (list.items || []).map(app => this.parseAppFields(app, isApplication));
                 return list;
             });
     }
 
-    public get(name: string, refresh?: 'normal' | 'hard'): Promise<models.Application> {
-        const query: {[key: string]: string} = {};
+    public get(name: string, appNamespace: string, objectListKind: string, refresh?: 'normal' | 'hard'): Promise<models.AbstractApplication> {
+        const query: {[key: string]: string} = {...namespaceQuery(objectListKind, appNamespace)};
+        const isApplication = objectListKind === 'application';
+        const endpoint = isApplication ? '/applications' : '/applicationsets';
         if (refresh) {
             query.refresh = refresh;
         }
         return requests
-            .get(`/applications/${name}`)
+            .get(`${endpoint}/${name}`)
             .query(query)
-            .then(res => this.parseAppFields(res.body));
+            .then(res => this.parseAppFields(res.body, isApplication));
     }
 
-    public getApplicationSyncWindowState(name: string): Promise<models.ApplicationSyncWindowState> {
+    public getApplicationSyncWindowState(name: string, appNamespace: string): Promise<models.ApplicationSyncWindowState> {
         return requests
             .get(`/applications/${name}/syncwindows`)
-            .query({name})
+            .query({name, appNamespace})
             .then(res => res.body as models.ApplicationSyncWindowState);
     }
 
-    public revisionMetadata(name: string, revision: string): Promise<models.RevisionMetadata> {
-        return requests.get(`/applications/${name}/revisions/${revision || 'HEAD'}/metadata`).then(res => res.body as models.RevisionMetadata);
+    public ociMetadata(name: string, appNamespace: string, revision: string, sourceIndex: number, versionId: number): Promise<models.OCIMetadata> {
+        let r = requests.get(`/applications/${name}/revisions/${revision || 'HEAD'}/ocimetadata`).query({appNamespace});
+        if (sourceIndex !== null) {
+            r = r.query({sourceIndex});
+        }
+        if (versionId !== null) {
+            r = r.query({versionId});
+        }
+        return r.then(res => res.body as models.OCIMetadata);
     }
 
-    public resourceTree(name: string): Promise<models.ApplicationTree> {
-        return requests.get(`/applications/${name}/resource-tree`).then(res => res.body as models.ApplicationTree);
+    public revisionMetadata(name: string, appNamespace: string, revision: string, sourceIndex: number | null, versionId: number | null): Promise<models.RevisionMetadata> {
+        let r = requests.get(`/applications/${name}/revisions/${revision || 'HEAD'}/metadata`).query({appNamespace});
+        if (sourceIndex !== null) {
+            r = r.query({sourceIndex});
+        }
+        if (versionId !== null) {
+            r = r.query({versionId});
+        }
+        return r.then(res => res.body as models.RevisionMetadata);
     }
 
-    public watchResourceTree(name: string): Observable<models.ApplicationTree> {
-        return requests.loadEventSource(`/stream/applications/${name}/resource-tree`).map(data => JSON.parse(data).result as models.ApplicationTree);
+    public revisionChartDetails(name: string, appNamespace: string, revision: string, sourceIndex: number, versionId: number | null): Promise<models.ChartDetails> {
+        let r = requests.get(`/applications/${name}/revisions/${revision || 'HEAD'}/chartdetails`).query({appNamespace});
+        if (sourceIndex !== null) {
+            r = r.query({sourceIndex});
+        }
+        if (versionId !== null) {
+            r = r.query({versionId});
+        }
+        return r.then(res => res.body as models.ChartDetails);
     }
 
-    public managedResources(name: string, options: {id?: models.ResourceID; fields?: string[]} = {}): Promise<models.ResourceDiff[]> {
+    public resourceTree(name: string, appNamespace: string, objectListKind: string): Promise<models.AbstractApplicationTree> {
+        const isApplication = objectListKind === 'application';
+        const endpoint = isApplication ? '/applications' : '/applicationsets';
+        return requests
+            .get(`${endpoint}/${name}/resource-tree`)
+            .query(namespaceQuery(objectListKind, appNamespace))
+            .then(res => {
+                const tree = res.body as models.AbstractApplicationTree;
+                if (!isApplication && tree) {
+                    tree.nodes = dropStaleGeneratedAppStatus(tree.nodes || []);
+                }
+                return tree;
+            });
+    }
+
+    public watchResourceTree(name: string, appNamespace: string, objectListKind: string): Observable<models.ApplicationTree> {
+        const isApplication = objectListKind === 'application';
+        // ApplicationSet has no streaming resource-tree endpoint: re-fetch it on watch events (rate-limited, as
+        // status.resources updates can be frequent) to keep server-side fields such as createdAt, falling back
+        // to a tree derived from status.resources when the fetch fails.
+        if (!isApplication) {
+            return this.watch(objectListKind, {name, appNamespace}).pipe(
+                filter(watchEvent => watchEvent.type !== 'DELETED'),
+                auditTime(1000),
+                switchMap(
+                    watchEvent =>
+                        this.resourceTree(name, appNamespace, objectListKind).catch(
+                            () =>
+                                ({
+                                    nodes: dropStaleGeneratedAppStatus(
+                                        (watchEvent.application.status?.resources || []).map(res => ({
+                                            ...res,
+                                            parentRefs: [] as models.ResourceRef[],
+                                            info: [] as models.InfoItem[],
+                                            resourceVersion: '',
+                                            uid: ''
+                                        }))
+                                    ),
+                                    orphanedNodes: [],
+                                    hosts: []
+                                }) as models.ApplicationTree
+                        ) as Promise<models.ApplicationTree>
+                )
+            );
+        }
+        return requests
+            .loadEventSource(`/stream/applications/${name}/resource-tree?appNamespace=${appNamespace}`)
+            .pipe(map(data => JSON.parse(data).result as models.ApplicationTree));
+    }
+
+    public managedResources(name: string, appNamespace: string, options: {id?: models.ResourceID; fields?: string[]} = {}): Promise<models.ResourceDiff[]> {
         return requests
             .get(`/applications/${name}/managed-resources`)
+            .query(`appNamespace=${appNamespace.toString()}`)
             .query({...options.id, fields: (options.fields || []).join(',')})
             .then(res => (res.body.items as any[]) || [])
             .then(items => {
@@ -83,35 +204,46 @@ export class ApplicationsService {
             });
     }
 
-    public getManifest(name: string, revision: string): Promise<models.ManifestResponse> {
+    public getManifest(name: string, appNamespace: string, revision: string): Promise<models.ManifestResponse> {
         return requests
             .get(`/applications/${name}/manifests`)
-            .query({name, revision})
+            .query({name, revision, appNamespace})
             .then(res => res.body as models.ManifestResponse);
     }
 
-    public updateSpec(appName: string, spec: models.ApplicationSpec): Promise<models.ApplicationSpec> {
+    public updateSpec(appName: string, appNamespace: string, spec: models.ApplicationSpec): Promise<models.ApplicationSpec> {
         return requests
             .put(`/applications/${appName}/spec`)
+            .query({appNamespace})
             .send(spec)
             .then(res => res.body as models.ApplicationSpec);
     }
 
-    public update(app: models.Application): Promise<models.Application> {
+    public update(app: models.AbstractApplication, query: {validate?: boolean} = {}): Promise<models.AbstractApplication> {
+        const isAnApp = isApp(app);
         return requests
-            .put(`/applications/${app.metadata.name}`)
-            .send(app)
-            .then(res => this.parseAppFields(res.body));
+            .put(`${getRootPathByApp(app)}/${app.metadata.name}`)
+            .query(query)
+            .send(isAnApp ? (app as models.Application) : (app as models.ApplicationSet)) // Will always be an Application as AppSet UI is not yet implemented
+            .then(res => this.parseAppFields(res.body, isAnApp));
     }
 
-    public create(app: models.Application): Promise<models.Application> {
+    public create(app: models.AbstractApplication): Promise<models.AbstractApplication> {
+        const isAnApp = isApp(app);
+        // Namespace may be specified in the app name. We need to parse and
+        // handle it accordingly.
+        if (app.metadata.name.includes('/')) {
+            const nns = app.metadata.name.split('/', 2);
+            app.metadata.name = nns[1];
+            app.metadata.namespace = nns[0];
+        }
         return requests
-            .post(`/applications`)
-            .send(app)
-            .then(res => this.parseAppFields(res.body));
+            .post(getRootPathByApp(app))
+            .send(isAnApp ? (app as models.Application) : (app as models.ApplicationSet)) // Will always be an Application as AppSet UI is not yet implemented
+            .then(res => this.parseAppFields(res.body, isAnApp));
     }
 
-    public delete(name: string, propagationPolicy: string): Promise<boolean> {
+    public delete(name: string, appNamespace: string, propagationPolicy: string): Promise<boolean> {
         let cascade = true;
         if (propagationPolicy === 'non-cascading') {
             propagationPolicy = '';
@@ -121,14 +253,21 @@ export class ApplicationsService {
             .delete(`/applications/${name}`)
             .query({
                 cascade,
-                propagationPolicy
+                propagationPolicy,
+                appNamespace
             })
             .send({})
             .then(() => true);
     }
 
-    public watch(query?: {name?: string; resourceVersion?: string}, options?: QueryOptions): Observable<models.ApplicationWatchEvent> {
+    public watch(
+        objectListKind: string,
+        query?: {name?: string; resourceVersion?: string; projects?: string[]; appNamespace?: string},
+        options?: QueryOptions
+    ): Observable<models.ApplicationWatchEvent> {
         const search = new URLSearchParams();
+        const isApplication = objectListKind === 'application';
+        const endpoint = isApplication ? '/applications' : '/applicationsets';
         if (query) {
             if (query.name) {
                 search.set('name', query.name);
@@ -136,66 +275,122 @@ export class ApplicationsService {
             if (query.resourceVersion) {
                 search.set('resourceVersion', query.resourceVersion);
             }
+            if (query.appNamespace) {
+                search.set(namespaceQueryKey(objectListKind, true), query.appNamespace);
+            }
         }
         if (options) {
             const searchOptions = optionsToSearch(options);
             search.set('fields', searchOptions.fields);
             search.set('selector', searchOptions.selector);
+            if (searchOptions.appNamespace) {
+                search.set(namespaceQueryKey(objectListKind, true), searchOptions.appNamespace);
+            }
+            if (isApplication) {
+                query?.projects?.forEach(project => search.append('projects', project));
+            }
+            searchOptions.names?.forEach(name => search.append('names', name));
         }
         const searchStr = search.toString();
-        const url = `/stream/applications${(searchStr && '?' + searchStr) || ''}`;
+        const url = `/stream${endpoint}${(searchStr && '?' + searchStr) || ''}`;
         return requests
             .loadEventSource(url)
-            .repeat()
-            .retry()
-            .map(data => JSON.parse(data).result as models.ApplicationWatchEvent)
-            .map(watchEvent => {
-                watchEvent.application = this.parseAppFields(watchEvent.application);
-                return watchEvent;
-            });
+            .pipe(repeat())
+            .pipe(retry())
+            .pipe(map(data => JSON.parse(data).result as models.ApplicationWatchEvent))
+            .pipe(
+                map(watchEvent => {
+                    // ApplicationSetWatchEvent has 'applicationSet' field, normalize to 'application'
+                    const rawApp = isApplication ? watchEvent.application : (watchEvent as unknown as models.ApplicationSetWatchEvent).applicationSet;
+                    watchEvent.application = this.parseAppFields(rawApp, isApplication) as models.Application;
+                    return watchEvent;
+                })
+            );
     }
 
     public sync(
         name: string,
+        appNamespace: string,
         revision: string,
-        prune: boolean,
+        prune: boolean | undefined,
         dryRun: boolean,
         strategy: models.SyncStrategy,
         resources: models.SyncOperationResource[],
-        syncOptions?: string[]
+        syncOptions?: string[],
+        retryStrategy?: models.RetryStrategy,
+        message?: string
     ): Promise<boolean> {
+        // Omit prune only when undefined so the API can apply syncPolicy.manualDefaults.prune
+        // when that object is set. Callers must pass false (not undefined) when the user
+        // unchecks Prune, otherwise apps with manualDefaults would still prune.
+        const body: Record<string, unknown> = {
+            appNamespace,
+            revision,
+            dryRun: !!dryRun,
+            strategy,
+            resources,
+            syncOptions: syncOptions ? {items: syncOptions} : null,
+            retryStrategy
+        };
+        if (prune !== undefined) {
+            body.prune = !!prune;
+        }
+        body.infos = message ? [{name: 'message', value: message} as models.Info] : [];
         return requests
             .post(`/applications/${name}/sync`)
-            .send({revision, prune: !!prune, dryRun: !!dryRun, strategy, resources, syncOptions: syncOptions ? {items: syncOptions} : null})
+            .send(body)
             .then(() => true);
     }
 
-    public rollback(name: string, id: number): Promise<boolean> {
+    public rollback(name: string, appNamespace: string, id: number, prune?: boolean): Promise<boolean> {
         return requests
             .post(`/applications/${name}/rollback`)
-            .send({id})
+            .send({id, appNamespace, prune})
             .then(() => true);
     }
 
-    public getDownloadLogsURL(applicationName: string, namespace: string, podName: string, resource: {group: string; kind: string; name: string}, containerName: string): string {
-        const search = this.getLogsQuery(namespace, podName, resource, containerName, null, false);
-        search.set('download', 'true');
-        return `/api/v1/applications/${applicationName}/logs?${search.toString()}`;
-    }
-
-    public getContainerLogs(
+    public getDownloadLogsURL(
         applicationName: string,
+        appNamespace: string,
         namespace: string,
         podName: string,
         resource: {group: string; kind: string; name: string},
         containerName: string,
-        tail?: number,
-        follow?: boolean,
-        untilTime?: string,
-        filter?: string
-    ): Observable<models.LogEntry> {
-        const search = this.getLogsQuery(namespace, podName, resource, containerName, tail, follow, untilTime, filter);
-        const entries = requests.loadEventSource(`/applications/${applicationName}/logs?${search.toString()}`).map(data => JSON.parse(data).result as models.LogEntry);
+        previous: boolean
+    ): string {
+        const search = this.getLogsQuery({namespace, appNamespace, podName, resource, containerName, follow: false, previous});
+        search.set('download', 'true');
+        return `api/v1/applications/${applicationName}/logs?${search.toString()}`;
+    }
+
+    public getContainerLogs(query: {
+        applicationName: string;
+        appNamespace: string;
+        namespace: string;
+        podName: string;
+        resource: {group: string; kind: string; name: string};
+        containerName: string;
+        tail?: number;
+        follow?: boolean;
+        sinceSeconds?: number;
+        untilTime?: string;
+        filter?: string;
+        matchCase?: boolean;
+        previous?: boolean;
+    }): Observable<models.LogEntry> {
+        const {applicationName} = query;
+        const search = this.getLogsQuery(query);
+        const entries = requests.loadEventSource(`/applications/${applicationName}/logs?${search.toString()}`).pipe(
+            map(data => {
+                try {
+                    const parsed = JSON.parse(data);
+                    return parsed && parsed.result ? (parsed.result as models.LogEntry) : null;
+                } catch {
+                    return null;
+                }
+            }),
+            filter((result): result is models.LogEntry => !!result)
+        );
         let first = true;
         return new Observable(observer => {
             const subscription = entries.subscribe(
@@ -222,58 +417,75 @@ export class ApplicationsService {
         });
     }
 
-    public getResource(name: string, resource: models.ResourceNode): Promise<models.State> {
+    public getResource(name: string, appNamespace: string, resource: models.ResourceNode): Promise<models.State> {
         return requests
             .get(`/applications/${name}/resource`)
             .query({
                 name: resource.name,
+                appNamespace,
                 namespace: resource.namespace,
                 resourceName: resource.name,
                 version: resource.version,
                 kind: resource.kind,
-                group: resource.group
+                group: resource.group || '' // The group query param must be present even if empty.
             })
             .then(res => res.body as {manifest: string})
             .then(res => JSON.parse(res.manifest) as models.State);
     }
 
-    public getResourceActions(name: string, resource: models.ResourceNode): Promise<models.ResourceAction[]> {
+    public getResourceActions(name: string, appNamespace: string, resource: models.ResourceNode): Promise<models.ResourceAction[]> {
         return requests
             .get(`/applications/${name}/resource/actions`)
             .query({
+                appNamespace,
                 namespace: resource.namespace,
                 resourceName: resource.name,
                 version: resource.version,
                 kind: resource.kind,
                 group: resource.group
             })
-            .then(res => (res.body.actions as models.ResourceAction[]) || []);
+            .then(res => {
+                const actions = (res.body.actions as models.ResourceAction[]) || [];
+                actions.sort((actionA, actionB) => actionA.name.localeCompare(actionB.name));
+                return actions;
+            });
     }
 
-    public runResourceAction(name: string, resource: models.ResourceNode, action: string): Promise<models.ResourceAction[]> {
+    public runResourceAction(
+        name: string,
+        appNamespace: string,
+        resource: models.ResourceNode,
+        action: string,
+        resourceActionParameters: models.ResourceActionParam[]
+    ): Promise<models.ResourceAction[]> {
         return requests
-            .post(`/applications/${name}/resource/actions`)
-            .query({
-                namespace: resource.namespace,
-                resourceName: resource.name,
-                version: resource.version,
-                kind: resource.kind,
-                group: resource.group
-            })
-            .send(JSON.stringify(action))
+            .post(`/applications/${name}/resource/actions/v2`)
+            .send(
+                JSON.stringify({
+                    appNamespace,
+                    namespace: resource.namespace,
+                    resourceName: resource.name,
+                    version: resource.version,
+                    kind: resource.kind,
+                    group: resource.group,
+                    resourceActionParameters: resourceActionParameters,
+                    action
+                })
+            )
             .then(res => (res.body.actions as models.ResourceAction[]) || []);
     }
 
-    public patchResource(name: string, resource: models.ResourceNode, patch: string, patchType: string): Promise<models.State> {
+    public patchResource(name: string, appNamespace: string, resource: models.ResourceNode, patch: string, patchType: string): Promise<models.State> {
         return requests
             .post(`/applications/${name}/resource`)
             .query({
                 name: resource.name,
+                appNamespace,
                 namespace: resource.namespace,
                 resourceName: resource.name,
                 version: resource.version,
                 kind: resource.kind,
-                group: resource.group,
+                group: resource.group || '', // The group query param must be present even if empty.
                 patchType
             })
             .send(JSON.stringify(patch))
@@ -281,16 +493,17 @@ export class ApplicationsService {
             .then(res => JSON.parse(res.manifest) as models.State);
     }
 
-    public deleteResource(applicationName: string, resource: models.ResourceNode, force: boolean, orphan: boolean): Promise<any> {
+    public deleteResource(applicationName: string, appNamespace: string, resource: models.ResourceNode, force: boolean, orphan: boolean): Promise<any> {
         return requests
             .delete(`/applications/${applicationName}/resource`)
             .query({
                 name: resource.name,
+                appNamespace,
                 namespace: resource.namespace,
                 resourceName: resource.name,
                 version: resource.version,
                 kind: resource.kind,
-                group: resource.group,
+                group: resource.group || '', // The group query param must be present even if empty.
                 force,
                 orphan
             })
@@ -298,15 +511,17 @@ export class ApplicationsService {
             .then(() => true);
     }
 
-    public events(applicationName: string): Promise<models.Event[]> {
+    public events(applicationName: string, appNamespace: string): Promise<models.Event[]> {
         return requests
             .get(`/applications/${applicationName}/events`)
+            .query({appNamespace})
             .send()
             .then(res => (res.body as models.EventList).items || []);
     }
 
     public resourceEvents(
         applicationName: string,
+        appNamespace: string,
         resource: {
             namespace: string;
             name: string;
@@ -316,6 +531,7 @@ export class ApplicationsService {
         return requests
             .get(`/applications/${applicationName}/events`)
             .query({
+                appNamespace,
                 resourceUID: resource.uid,
                 resourceNamespace: resource.namespace,
                 resourceName: resource.name
@@ -324,32 +540,72 @@ export class ApplicationsService {
             .then(res => (res.body as models.EventList).items || []);
     }
 
-    public terminateOperation(applicationName: string): Promise<boolean> {
+    public terminateOperation(applicationName: string, appNamespace: string): Promise<boolean> {
         return requests
             .delete(`/applications/${applicationName}/operation`)
+            .query({appNamespace})
             .send()
             .then(() => true);
     }
 
-    private getLogsQuery(
-        namespace: string,
-        podName: string,
-        resource: {group: string; kind: string; name: string},
-        containerName: string,
-        tail?: number,
-        follow?: boolean,
-        untilTime?: string,
-        filter?: string
-    ): URLSearchParams {
+    public getLinks(applicationName: string, namespace: string): Promise<models.LinksResponse> {
+        return requests
+            .get(`/applications/${applicationName}/links`)
+            .query({namespace})
+            .send()
+            .then(res => res.body as models.LinksResponse);
+    }
+
+    public getResourceLinks(applicationName: string, appNamespace: string, resource: models.ResourceNode): Promise<models.LinksResponse> {
+        return requests
+            .get(`/applications/${applicationName}/resource/links`)
+            .query({
+                name: resource.name,
+                appNamespace,
+                namespace: resource.namespace,
+                resourceName: resource.name,
+                version: resource.version,
+                kind: resource.kind,
+                group: resource.group || '' // The group query param must be present even if empty.
+            })
+            .send()
+            .then(res => {
+                const links = res.body as models.LinksResponse;
+                const items: models.LinkInfo[] = [];
+                (links?.items || []).forEach(link => {
+                    if (isValidURL(link.url)) {
+                        items.push(link);
+                    }
+                });
+                links.items = items;
+                return links;
+            });
+    }
+
+    private getLogsQuery(query: {
+        namespace: string;
+        appNamespace: string;
+        podName: string;
+        resource: {group: string; kind: string; name: string};
+        containerName: string;
+        tail?: number;
+        follow?: boolean;
+        sinceSeconds?: number;
+        untilTime?: string;
+        filter?: string;
+        matchCase?: boolean;
+        previous?: boolean;
+    }): URLSearchParams {
+        const {appNamespace, containerName, namespace, podName, resource, tail, sinceSeconds, untilTime, filter, previous, matchCase} = query;
+        let {follow} = query;
         if (follow === undefined || follow === null) {
             follow = true;
         }
         const search = new URLSearchParams();
+        search.set('appNamespace', appNamespace);
         search.set('container', containerName);
         search.set('namespace', namespace);
-        if (follow) {
-            search.set('follow', follow.toString());
-        }
+        search.set('follow', follow.toString());
         if (podName) {
             search.set('podName', podName);
         } else {
@@ -366,25 +622,85 @@ export class ApplicationsService {
         if (filter) {
             search.set('filter', filter);
         }
+        if (previous) {
+            search.set('previous', previous.toString());
+        }
+        if (matchCase) {
+            search.set('matchCase', matchCase.toString());
+        }
+        // The API requires that this field be set to a non-empty string.
+        if (sinceSeconds) {
+            search.set('sinceSeconds', sinceSeconds.toString());
+        } else {
+            search.set('sinceSeconds', '0');
+        }
         return search;
     }
 
-    private parseAppFields(data: any): models.Application {
-        data = deepMerge(
-            {
-                apiVersion: 'argoproj.io/v1alpha1',
-                kind: 'Application',
-                spec: {
-                    project: 'default'
+    private parseAppFields(data: any, isFromApps: boolean): models.AbstractApplication {
+        if (isFromApps) {
+            data = deepMerge(
+                {
+                    apiVersion: 'argoproj.io/v1alpha1',
+                    kind: 'Application',
+                    metadata: {},
+                    spec: {
+                        project: 'default'
+                    },
+                    status: {
+                        resources: [],
+                        summary: {}
+                    }
                 },
-                status: {
-                    resources: [],
-                    summary: {}
-                }
-            },
-            data
-        );
+                data
+            );
 
-        return data as models.Application;
+            return data as models.Application;
+        } else {
+            data = deepMerge(
+                {
+                    apiVersion: 'argoproj.io/v1alpha1',
+                    kind: 'ApplicationSet',
+                    metadata: {},
+                    spec: {},
+                    status: {
+                        resources: []
+                    }
+                },
+                data
+            );
+            if (data.status?.resources?.[0]) {
+                data.status.resources[0].kind = 'Application';
+                data.status.resources[0].group = 'argoproj.io';
+            }
+            return data as models.ApplicationSet;
+        }
+    }
+
+    public async getApplicationSet(name: string, namespace: string): Promise<models.ApplicationSet> {
+        return requests
+            .get(`/applicationsets/${name}`)
+            .query({appsetNamespace: namespace})
+            .then(res => res.body as models.ApplicationSet);
+    }
+
+    public async listApplicationSets(): Promise<models.ApplicationSetList> {
+        return requests.get(`/applicationsets`).then(res => res.body as models.ApplicationSetList);
+    }
+
+    public appSetEvents(name: string, appNamespace: string): Promise<models.Event[]> {
+        return requests
+            .get(`/applicationsets/${name}/events`)
+            .query({appsetNamespace: appNamespace})
+            .then(res => (res.body as models.EventList).items || []);
+    }
+
+    public appSetGenerate(appSet: models.ApplicationSet): Promise<models.Application[]> {
+        const {status, ...rest} = appSet as models.ApplicationSet & {status?: unknown};
+        void status;
+        return requests
+            .post(`/applicationsets/generate`)
+            .send({applicationSet: rest})
+            .then(res => (res.body as {applications?: models.Application[]}).applications || []);
     }
 }

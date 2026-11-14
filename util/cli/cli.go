@@ -5,29 +5,70 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
+	stderrors "errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"math"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 
+	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/text"
 	"github.com/google/shlex"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/ssh/terminal"
+	"github.com/spf13/pflag"
+	terminal "golang.org/x/term"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/util/term"
 	"sigs.k8s.io/yaml"
 
-	"github.com/argoproj/argo-cd/v2/common"
-	"github.com/argoproj/argo-cd/v2/util/errors"
-	"github.com/argoproj/argo-cd/v2/util/io"
+	"github.com/argoproj/argo-cd/v3/common"
+	"github.com/argoproj/argo-cd/v3/util/errors"
+	utilio "github.com/argoproj/argo-cd/v3/util/io"
+	utillog "github.com/argoproj/argo-cd/v3/util/log"
 )
+
+func WithSignalContext(run func(c *cobra.Command, args []string, cancel context.CancelFunc)) func(c *cobra.Command, args []string) {
+	runE := WithSignalContextE(func(c *cobra.Command, args []string, cancel context.CancelFunc) error {
+		run(c, args, cancel)
+		return nil
+	})
+	return func(c *cobra.Command, args []string) {
+		_ = runE(c, args)
+	}
+}
+
+func WithSignalContextE(run func(c *cobra.Command, args []string, cancel context.CancelFunc) error) func(c *cobra.Command, args []string) error {
+	return func(c *cobra.Command, args []string) error {
+		ctx, cancel := context.WithCancel(c.Context())
+		defer cancel()
+		c.SetContext(ctx)
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			// unregister once the context is done, whatever cancelled it, so a second Ctrl+C falls through to
+			// the default handler and kills the process
+			defer signal.Stop(sigCh)
+			select {
+			case s := <-sigCh:
+				log.Printf("got signal %v, attempting graceful shutdown", s)
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+
+		return run(c, args, cancel)
+	}
+}
 
 // NewVersionCmd returns a new `version` command to be used as a sub-command to root
 func NewVersionCmd(cliName string) *cobra.Command {
@@ -35,7 +76,7 @@ func NewVersionCmd(cliName string) *cobra.Command {
 	versionCmd := cobra.Command{
 		Use:   "version",
 		Short: "Print version information",
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			version := common.GetVersion()
 			fmt.Printf("%s: %s\n", cliName, version)
 			if short {
@@ -50,21 +91,30 @@ func NewVersionCmd(cliName string) *cobra.Command {
 			fmt.Printf("  GoVersion: %s\n", version.GoVersion)
 			fmt.Printf("  Compiler: %s\n", version.Compiler)
 			fmt.Printf("  Platform: %s\n", version.Platform)
+			if version.ExtraBuildInfo != "" {
+				fmt.Printf("  ExtraBuildInfo: %s\n", version.ExtraBuildInfo)
+			}
 		},
 	}
 	versionCmd.Flags().BoolVar(&short, "short", false, "print just the version number")
 	return &versionCmd
 }
 
-// AddKubectlFlagsToCmd adds kubectl like flags to a command and returns the ClientConfig interface
+// AddKubectlFlagsToCmd adds kubectl like flags to a persistent flags of a command and returns the ClientConfig interface
 // for retrieving the values.
 func AddKubectlFlagsToCmd(cmd *cobra.Command) clientcmd.ClientConfig {
+	return AddKubectlFlagsToSet(cmd.PersistentFlags())
+}
+
+// AddKubectlFlagsToSet adds kubectl like flags to a provided flag set and returns the ClientConfig interface
+// for retrieving the values.
+func AddKubectlFlagsToSet(flags *pflag.FlagSet) clientcmd.ClientConfig {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	loadingRules.DefaultClientConfig = &clientcmd.DefaultClientConfig
 	overrides := clientcmd.ConfigOverrides{}
 	kflags := clientcmd.RecommendedConfigOverrideFlags("")
-	cmd.PersistentFlags().StringVar(&loadingRules.ExplicitPath, "kubeconfig", "", "Path to a kube config. Only required if out-of-cluster")
-	clientcmd.BindOverrideFlags(&overrides, cmd.PersistentFlags(), kflags)
+	flags.StringVar(&loadingRules.ExplicitPath, "kubeconfig", "", "Path to a kube config. Only required if out-of-cluster")
+	clientcmd.BindOverrideFlags(&overrides, flags, kflags)
 	return clientcmd.NewInteractiveDeferredLoadingClientConfig(loadingRules, &overrides, os.Stdin)
 }
 
@@ -90,12 +140,21 @@ func PromptMessage(message, value string) string {
 	return value
 }
 
-// PromptPassword prompts the user for a password, without local echo. (unless already supplied)
+// PromptPassword prompts the user for a password, without local echo (unless already supplied).
+// If terminal.ReadPassword fails — often due to stdin not being a terminal (e.g., when input is piped),
+// we fall back to reading from standard input using bufio.Reader.
 func PromptPassword(password string) string {
 	for password == "" {
 		fmt.Print("Password: ")
 		passwordRaw, err := terminal.ReadPassword(int(os.Stdin.Fd()))
-		errors.CheckError(err)
+		if err != nil {
+			// Fallback: handle cases where stdin is not a terminal (e.g., piped input)
+			reader := bufio.NewReader(os.Stdin)
+			input, err := reader.ReadString('\n')
+			errors.CheckError(err)
+			password = strings.TrimSpace(input)
+			return password
+		}
 		password = string(passwordRaw)
 		fmt.Print("\n")
 	}
@@ -103,7 +162,7 @@ func PromptPassword(password string) string {
 }
 
 // AskToProceed prompts the user with a message (typically a yes or no question) and returns whether
-// or not they responded in the affirmative or negative.
+// they responded in the affirmative or negative.
 func AskToProceed(message string) bool {
 	for {
 		fmt.Print(message)
@@ -119,22 +178,41 @@ func AskToProceed(message string) bool {
 	}
 }
 
-// ReadAndConfirmPassword is a helper to read and confirm a password from stdin
-func ReadAndConfirmPassword() (string, error) {
+// AskToProceedS prompts the user with a message (typically a yes, no or all question) and returns string
+// "a", "y" or "n".
+func AskToProceedS(message string) string {
 	for {
-		fmt.Print("*** Enter new password: ")
+		fmt.Print(message)
+		reader := bufio.NewReader(os.Stdin)
+		proceedRaw, err := reader.ReadString('\n')
+		errors.CheckError(err)
+		switch strings.ToLower(strings.TrimSpace(proceedRaw)) {
+		case "y", "yes":
+			return "y"
+		case "n", "no":
+			return "n"
+		case "a", "all":
+			return "a"
+		}
+	}
+}
+
+// ReadAndConfirmPassword is a helper to read and confirm a password from stdin
+func ReadAndConfirmPassword(username string) (string, error) {
+	for {
+		fmt.Printf("*** Enter new password for user %s: ", username)
 		password, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
 			return "", err
 		}
 		fmt.Print("\n")
-		fmt.Print("*** Confirm new password: ")
+		fmt.Printf("*** Confirm new password for user %s: ", username)
 		confirmPassword, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
 			return "", err
 		}
 		fmt.Print("\n")
-		if string(password) == string(confirmPassword) {
+		if bytes.Equal(password, confirmPassword) {
 			return string(password), nil
 		}
 		log.Error("Passwords do not match")
@@ -144,35 +222,39 @@ func ReadAndConfirmPassword() (string, error) {
 // SetLogFormat sets a logrus log format
 func SetLogFormat(logFormat string) {
 	switch strings.ToLower(logFormat) {
-	case "json":
-		log.SetFormatter(&log.JSONFormatter{})
-	case "text":
-		if os.Getenv("FORCE_LOG_COLORS") == "1" {
-			log.SetFormatter(&log.TextFormatter{ForceColors: true})
-		}
+	case utillog.JsonFormat:
+		os.Setenv(common.EnvLogFormat, utillog.JsonFormat)
+	case utillog.TextFormat, "":
+		os.Setenv(common.EnvLogFormat, utillog.TextFormat)
 	default:
 		log.Fatalf("Unknown log format '%s'", logFormat)
 	}
+
+	log.SetFormatter(utillog.CreateFormatter(logFormat))
 }
 
 // SetLogLevel parses and sets a logrus log level
 func SetLogLevel(logLevel string) {
-	level, err := log.ParseLevel(logLevel)
+	level, err := log.ParseLevel(text.FirstNonEmpty(logLevel, log.InfoLevel.String()))
 	errors.CheckError(err)
+	os.Setenv(common.EnvLogLevel, level.String())
 	log.SetLevel(level)
 }
 
 // SetGLogLevel set the glog level for the k8s go-client
 func SetGLogLevel(glogLevel int) {
 	klog.InitFlags(nil)
+	// Opt into fixed stderrthreshold behavior (kubernetes/klog#212).
+	_ = flag.Set("legacy_stderr_threshold_behavior", "false")
+	_ = flag.Set("stderrthreshold", "INFO")
 	_ = flag.Set("logtostderr", "true")
 	_ = flag.Set("v", strconv.Itoa(glogLevel))
 }
 
 func writeToTempFile(pattern string, data []byte) string {
-	f, err := ioutil.TempFile("", pattern)
+	f, err := os.CreateTemp("", pattern)
 	errors.CheckError(err)
-	defer io.Close(f)
+	defer utilio.Close(f)
 	_, err = f.Write(data)
 	errors.CheckError(err)
 	return f.Name()
@@ -205,7 +287,7 @@ const (
 func setComments(input []byte, comments string) []byte {
 	input = stripComments(input)
 	var commentLines []string
-	for _, line := range strings.Split(comments, "\n") {
+	for line := range strings.SplitSeq(comments, "\n") {
 		if line != "" {
 			commentLines = append(commentLines, "# "+line)
 		}
@@ -234,7 +316,7 @@ func InteractiveEdit(filePattern string, data []byte, save func(input []byte) er
 	for {
 		data = setComments(data, errorComment)
 		tempFile := writeToTempFile(filePattern, data)
-		cmd := exec.Command(editor, append(editorArgs, tempFile)...)
+		cmd := exec.CommandContext(context.Background(), editor, append(editorArgs, tempFile)...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
@@ -242,14 +324,13 @@ func InteractiveEdit(filePattern string, data []byte, save func(input []byte) er
 		err := (term.TTY{In: os.Stdin, TryDev: true}).Safe(cmd.Run)
 		errors.CheckError(err)
 
-		updated, err := ioutil.ReadFile(tempFile)
+		updated, err := os.ReadFile(tempFile)
 		errors.CheckError(err)
-		if string(updated) == "" || string(updated) == string(data) {
-			errors.CheckError(fmt.Errorf("Edit cancelled, no valid changes were saved."))
+		if len(updated) == 0 || bytes.Equal(updated, data) {
+			errors.CheckError(stderrors.New("edit cancelled, no valid changes were saved"))
 			break
-		} else {
-			data = stripComments(updated)
 		}
+		data = stripComments(updated)
 
 		err = save(data)
 		if err == nil {
@@ -262,7 +343,7 @@ func InteractiveEdit(filePattern string, data []byte, save func(input []byte) er
 // PrintDiff prints a diff between two unstructured objects to stdout using an external diff utility
 // Honors the diff utility set in the KUBECTL_EXTERNAL_DIFF environment variable
 func PrintDiff(name string, live *unstructured.Unstructured, target *unstructured.Unstructured) error {
-	tempDir, err := ioutil.TempDir("", "argocd-diff")
+	tempDir, err := os.MkdirTemp("", "argocd-diff")
 	if err != nil {
 		return err
 	}
@@ -274,11 +355,11 @@ func PrintDiff(name string, live *unstructured.Unstructured, target *unstructure
 			return err
 		}
 	}
-	err = ioutil.WriteFile(targetFile, targetData, 0644)
+	err = os.WriteFile(targetFile, targetData, 0o644)
 	if err != nil {
 		return err
 	}
-	liveFile := path.Join(tempDir, fmt.Sprintf("%s-live.yaml", name))
+	liveFile := path.Join(tempDir, name+"-live.yaml")
 	liveData := []byte("")
 	if live != nil {
 		liveData, err = yaml.Marshal(live)
@@ -286,7 +367,7 @@ func PrintDiff(name string, live *unstructured.Unstructured, target *unstructure
 			return err
 		}
 	}
-	err = ioutil.WriteFile(liveFile, liveData, 0644)
+	err = os.WriteFile(liveFile, liveData, 0o644)
 	if err != nil {
 		return err
 	}
@@ -300,8 +381,40 @@ func PrintDiff(name string, live *unstructured.Unstructured, target *unstructure
 		cmdBinary = parts[0]
 		args = parts[1:]
 	}
-	cmd := exec.Command(cmdBinary, append(args, liveFile, targetFile)...)
+	cmd := exec.CommandContext(context.Background(), cmdBinary, append(args, liveFile, targetFile)...)
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	return cmd.Run()
+}
+
+// boundedFloat64Value is a pflag.Value that accepts a float64 within [min, max].
+type boundedFloat64Value struct {
+	val      *float64
+	min, max float64
+}
+
+func (b *boundedFloat64Value) Set(s string) error {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return err
+	}
+	// NaN must be rejected explicitly: NaN comparisons are always false, so it would
+	// otherwise slip past the range check below.
+	if math.IsNaN(v) || v < b.min || v > b.max {
+		return fmt.Errorf("%s is out of range [%g, %g]", s, b.min, b.max)
+	}
+	*b.val = v
+	return nil
+}
+
+func (*boundedFloat64Value) Type() string { return "float" }
+
+func (b *boundedFloat64Value) String() string { return strconv.FormatFloat(*b.val, 'g', -1, 64) }
+
+// BoundedFloat64Var defines a float64 flag constrained to [min, max], rejecting out-of-range
+// or NaN input at parse time. It mirrors the signature of pflag's Float64Var. The default
+// value is not validated, matching pflag's behavior (Set runs only for an explicit flag).
+func BoundedFloat64Var(fs *pflag.FlagSet, p *float64, name string, value, minimum, maximum float64, usage string) {
+	*p = value
+	fs.Var(&boundedFloat64Value{val: p, min: minimum, max: maximum}, name, usage)
 }

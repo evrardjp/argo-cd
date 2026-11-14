@@ -3,21 +3,20 @@ package path
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"testing"
 )
 
 // CopyDir copies the contents of a directory from 'src' to 'dest'
 func CopyDir(src string, dest string) error {
-
 	mode, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
 
 	if mode.IsDir() {
-		dirContents, err := ioutil.ReadDir(src)
+		dirContents, err := os.ReadDir(src)
 		if err != nil {
 			return err
 		}
@@ -76,4 +75,11 @@ func copySingleFile(src string, dest string, mode os.FileInfo) error {
 	}
 
 	return nil
+}
+
+// CreateSymlink creates a symlink with name linkName to file destName in
+// workingDir
+func CreateSymlink(t *testing.T, destName, linkName string) error {
+	t.Helper()
+	return os.Symlink(destName, linkName)
 }

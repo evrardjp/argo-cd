@@ -6,11 +6,11 @@ for *some* parts of the  k8s manifests determined dynamically, or outside of Git
 redeploying an application by changing application parameters via Argo CD, instead of making the 
 changes to the manifests in Git.
 
-!!! tip
-    Many consider this mode of operation as an anti-pattern to GitOps, since the source of
-    truth becomes a union of the Git repository, and the application overrides. The Argo CD parameter
-    overrides feature is provided mainly as a convenience to developers and is intended to be used in
-    dev/test environments, vs. production environments.
+> [!TIP]
+> Many consider this mode of operation as an anti-pattern to GitOps, since the source of
+> truth becomes a union of the Git repository, and the application overrides. The Argo CD parameter
+> overrides feature is provided mainly as a convenience to developers and is intended to be used in
+> dev/test environments, vs. production environments.
 
 To use parameter overrides, run the `argocd app set -p (COMPONENT=)PARAM=VALUE` command:
 
@@ -26,8 +26,19 @@ argocd app set guestbook -p ingress.enabled=true
 argocd app set guestbook -p ingress.hosts[0]=guestbook.myclusterurl
 ```
 
-The `argocd app set` [command](./commands/argocd_app_set.md) supports more tool-specific flags such as `--kustomize-image`, `--jsonnet-ext-var-str` etc
-flags. You can also specify overrides directly in the source field on application spec. Read more about supported options in corresponded tool [documentation](./application_sources.md).
+The `argocd app set` [command](./commands/argocd_app_set.md) supports more tool-specific flags such as `--kustomize-image`, `--jsonnet-ext-var-str`, etc.
+You can also specify overrides directly in the source field on the application spec. Read more about supported options in the corresponding tool [documentation](./application_sources.md).
+
+## Overrides in Multi-Source Applications
+
+For multi-source applications, Argo CD allows you to override parameters for a specific source using the `--source-position` flag.
+Each source in the application spec is indexed starting from `0`.
+
+For example, to override a parameter in the **second source (index 1)** of a multi-source app:
+
+```bash
+argocd app set my-app --source-position 1 -p replicaCount=2
+```
 
 ## When To Use Overrides?
 
@@ -46,7 +57,7 @@ would result in the application being redeployed with the new image.
 Since commit access to the repository is unavailable, it is useful to be able to install charts from
 the public repository and customize the deployment with different parameters, without resorting to
 forking the repository to make the changes. For example, to install Redis from the Helm chart
-repository and customize the the database password, you would run:
+repository and customize the database password, you would run:
 
 ```bash
 argocd app create redis --repo https://github.com/helm/charts.git --path stable/redis --dest-server https://kubernetes.default.svc --dest-namespace default -p password=abc123
@@ -54,13 +65,8 @@ argocd app create redis --repo https://github.com/helm/charts.git --path stable/
 
 ## Store Overrides In Git
 
-> The following is available from v1.8 or later
-
 The config management tool specific overrides can be specified in `.argocd-source.yaml` file stored in the source application
 directory in the Git repository.
-
-!!! warn
-    The `.argocd-source` is a beta feature and subject to change.
 
 The `.argocd-source.yaml` file is used during manifest generation and overrides
 application source fields, such as `kustomize`, `helm` etc.
@@ -70,25 +76,26 @@ Example:
 ```yaml
 kustomize:
   images:
-    - gcr.io/heptio-images/ks-guestbook-demo:0.2
+    - quay.io/argoprojlabs/argocd-e2e-container:0.2
 ```
 
 The `.argocd-source` is trying to solve two following main use cases:
 
-- Provide the unifed way to "override" application parameters in Git and enable the "write back" feature
+- Provide the unified way to "override" application parameters in Git and enable the "write back" feature
 for projects like [argocd-image-updater](https://github.com/argoproj-labs/argocd-image-updater).
-- Support "discovering" applications in the Git repository by projects like [applicationset](https://github.com/argoproj-labs/applicationset)
-(see [git files generator](https://github.com/argoproj-labs/applicationset/blob/master/examples/git-files-discovery.yaml))
-
-> The following is available from v1.9 or later
+- Support "discovering" applications in the Git repository by projects like [applicationset](https://github.com/argoproj/applicationset)
+(see [git files generator](https://github.com/argoproj/argo-cd/blob/master/applicationset/examples/git-generator-files-discovery/git-generator-files.yaml))
 
 You can also store parameter overrides in an application specific file, if you
 are sourcing multiple applications from a single path in your repository.
 
 The application specific file must be named `.argocd-source-<appname>.yaml`,
 where `<appname>` is the name of the application the overrides are valid for.
+When combined with the [apps-in-any-namespace](../operator-manual/app-any-namespace.md)
+feature, filename is expected to include the namespace name as a prefix, i.e.
+`.argocd-source-<namespace>_<appname>.yaml`.
 
-If there exists an non-application specific `.argocd-source.yaml`, parameters
+If there exists a non-application specific `.argocd-source.yaml`, parameters
 included in that file will be merged first, and then the application specific
 parameters are merged, which can also contain overrides to the parameters
 stored in the non-application specific file.

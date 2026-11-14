@@ -3,18 +3,19 @@ package app
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 
-	"github.com/argoproj/gitops-engine/pkg/health"
-	. "github.com/argoproj/gitops-engine/pkg/sync/common"
-	v1 "k8s.io/api/core/v1"
-	apierr "k8s.io/apimachinery/pkg/api/errors"
+	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/health"
+	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/sync/common"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 
-	. "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
-	"github.com/argoproj/argo-cd/v2/test/e2e/fixture"
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	"github.com/argoproj/argo-cd/v3/test/e2e/fixture"
 )
 
 type state = string
@@ -27,14 +28,71 @@ const (
 
 type Expectation func(c *Consequences) (state state, message string)
 
-func OperationPhaseIs(expected OperationPhase) Expectation {
+func Or(e1 Expectation, e2 Expectation) Expectation {
+	return func(c *Consequences) (state, string) {
+		s1, m1 := e1(c)
+		if s1 == succeeded {
+			return s1, m1
+		}
+		s2, m2 := e2(c)
+		if s2 == succeeded {
+			return s2, m2
+		}
+		if s1 == pending {
+			return s1, m1
+		}
+		if s2 == pending {
+			return s2, m2
+		}
+		return failed, fmt.Sprintf("expectations unsuccessful: %s and %s", m1, m2)
+	}
+}
+
+func All(es ...Expectation) Expectation {
+	return func(c *Consequences) (state, string) {
+		pendingExps := []string{}
+		failedExps := []string{}
+		succeededExps := []string{}
+		for _, e := range es {
+			s, m := e(c)
+			if s == failed {
+				failedExps = append(failedExps, m)
+			}
+			if s == pending {
+				pendingExps = append(pendingExps, m)
+			}
+			if s == succeeded {
+				succeededExps = append(succeededExps, m)
+			}
+		}
+		result := succeeded
+		msg := "expectations statuses:"
+		if len(pendingExps) > 0 {
+			result = pending
+			msg += fmt.Sprintf(" pending: %v", pendingExps)
+		}
+		if len(failedExps) > 0 {
+			result = failed
+			msg += fmt.Sprintf(" failed: %v", failedExps)
+		}
+		if len(succeededExps) > 0 {
+			msg += fmt.Sprintf(" succeeded: %v", succeededExps)
+		}
+		return result, msg
+	}
+}
+
+func OperationPhaseIs(expected common.OperationPhase) Expectation {
 	return func(c *Consequences) (state, string) {
 		operationState := c.app().Status.OperationState
-		actual := OperationRunning
+		actual := common.OperationRunning
+		msg := ""
 		if operationState != nil {
 			actual = operationState.Phase
+			msg = operationState.Message
 		}
-		return simple(actual == expected, fmt.Sprintf("operation phase should be %s, is %s", expected, actual))
+		message := fmt.Sprintf("operation phase should be %s, is %s, message: '%s'", expected, actual, msg)
+		return simple(actual == expected, message)
 	}
 }
 
@@ -49,22 +107,66 @@ func OperationMessageContains(text string) Expectation {
 	}
 }
 
-func simple(success bool, message string) (state, string) {
-	if success {
-		return succeeded, message
-	} else {
-		return pending, message
+func OperationRetriedMinimumTimes(minRetries int64) Expectation {
+	return func(c *Consequences) (state, string) {
+		operationState := c.app().Status.OperationState
+		if operationState == nil {
+			return pending, "no operation state yet"
+		}
+		actual := operationState.RetryCount
+		message := fmt.Sprintf("operation state retry count should be at least %d, is %d, message: '%s'", minRetries, actual, operationState.Message)
+		return simple(actual >= minRetries, message)
 	}
 }
 
-func SyncStatusIs(expected SyncStatusCode) Expectation {
+func simple(success bool, message string) (state, string) {
+	if success {
+		return succeeded, message
+	}
+	return pending, message
+}
+
+func SyncStatusIs(expected v1alpha1.SyncStatusCode) Expectation {
 	return func(c *Consequences) (state, string) {
 		actual := c.app().Status.Sync.Status
 		return simple(actual == expected, fmt.Sprintf("sync status to be %s, is %s", expected, actual))
 	}
 }
 
-func Condition(conditionType ApplicationConditionType, conditionMessage string) Expectation {
+func SyncRevisionIs(expected string) Expectation {
+	return func(c *Consequences) (state, string) {
+		actual := c.app().Status.Sync.Revision
+		return simple(actual == expected, fmt.Sprintf("sync revision to be %s, is %s", expected, actual))
+	}
+}
+
+func DryRevisionIs(expected string) Expectation {
+	return func(c *Consequences) (state, string) {
+		actual := c.app().Status.SourceHydrator.LastSuccessfulOperation.DrySHA
+		return simple(actual == expected, fmt.Sprintf("dry source revision to be %s, is %s", expected, actual))
+	}
+}
+
+func HelmTemplateRuns() Expectation {
+	return func(c *Consequences) (state, string) {
+		isRunning := false
+		c.actions.GetHelmTemplateProcess()
+		processData := c.actions.GetLastOutput()
+		if processData != "" {
+			isRunning = true
+		}
+		return simple(isRunning, fmt.Sprintf("Helm template command is to be running, this is %v, processData: %q", isRunning, processData))
+	}
+}
+
+func HydrationPhaseIs(expected v1alpha1.HydrateOperationPhase) Expectation {
+	return func(c *Consequences) (state, string) {
+		actual := c.app().Status.SourceHydrator.CurrentOperation.Phase
+		return simple(actual == expected, fmt.Sprintf("hydration phase to be %s, is %s", expected, actual))
+	}
+}
+
+func Condition(conditionType v1alpha1.ApplicationConditionType, conditionMessage string) Expectation {
 	return func(c *Consequences) (state, string) {
 		got := c.app().Status.Conditions
 		message := fmt.Sprintf("condition {%s %s} in %v", conditionType, conditionMessage, got)
@@ -87,6 +189,48 @@ func NoConditions() Expectation {
 	}
 }
 
+func NoStatus() Expectation {
+	return func(c *Consequences) (state, string) {
+		message := "no status"
+		if reflect.ValueOf(c.app().Status).IsZero() {
+			return succeeded, message
+		}
+		return pending, message
+	}
+}
+
+func StatusExists() Expectation {
+	return func(c *Consequences) (state, string) {
+		message := "status exists"
+		if !reflect.ValueOf(c.app().Status).IsZero() {
+			return succeeded, message
+		}
+		return pending, message
+	}
+}
+
+func Status(f func(v1alpha1.ApplicationStatus) (bool, string)) Expectation {
+	return func(c *Consequences) (state, string) {
+		ok, msg := f(c.app().Status)
+		if !ok {
+			return pending, msg
+		}
+		return succeeded, msg
+	}
+}
+
+func Namespace(name string, block func(app *v1alpha1.Application, ns *corev1.Namespace)) Expectation {
+	return func(c *Consequences) (state, string) {
+		ns, err := namespace(name)
+		if err != nil {
+			return failed, "namespace not found " + err.Error()
+		}
+
+		block(c.app(), ns)
+		return succeeded, fmt.Sprintf("namespace %s assertions passed", name)
+	}
+}
+
 func HealthIs(expected health.HealthStatusCode) Expectation {
 	return func(c *Consequences) (state, string) {
 		actual := c.app().Status.Health.Status
@@ -94,48 +238,71 @@ func HealthIs(expected health.HealthStatusCode) Expectation {
 	}
 }
 
-func ResourceSyncStatusIs(kind, resource string, expected SyncStatusCode) Expectation {
+func ResourceSyncStatusIs(kind, resource string, expected v1alpha1.SyncStatusCode) Expectation {
 	return func(c *Consequences) (state, string) {
 		actual := c.resource(kind, resource, "").Status
 		return simple(actual == expected, fmt.Sprintf("resource '%s/%s' sync status should be %s, is %s", kind, resource, expected, actual))
 	}
 }
-func ResourceSyncStatusWithNamespaceIs(kind, resource, namespace string, expected SyncStatusCode) Expectation {
+
+func ResourceSyncStatusWithNamespaceIs(kind, resource, namespace string, expected v1alpha1.SyncStatusCode) Expectation {
 	return func(c *Consequences) (state, string) {
 		actual := c.resource(kind, resource, namespace).Status
 		return simple(actual == expected, fmt.Sprintf("resource '%s/%s' sync status should be %s, is %s", kind, resource, expected, actual))
 	}
 }
+
 func ResourceHealthIs(kind, resource string, expected health.HealthStatusCode) Expectation {
 	return func(c *Consequences) (state, string) {
-		actual := c.resource(kind, resource, "").Health.Status
+		var actual health.HealthStatusCode
+		resourceHealth := c.resource(kind, resource, "").Health
+		if resourceHealth != nil {
+			actual = resourceHealth.Status
+		} else {
+			// Some resources like ConfigMap may not have health status when they are okay
+			actual = health.HealthStatusHealthy
+		}
 		return simple(actual == expected, fmt.Sprintf("resource '%s/%s' health should be %s, is %s", kind, resource, expected, actual))
 	}
 }
+
 func ResourceHealthWithNamespaceIs(kind, resource, namespace string, expected health.HealthStatusCode) Expectation {
 	return func(c *Consequences) (state, string) {
-		actual := c.resource(kind, resource, namespace).Health.Status
+		var actual health.HealthStatusCode
+		resourceHealth := c.resource(kind, resource, namespace).Health
+		if resourceHealth != nil {
+			actual = resourceHealth.Status
+		} else {
+			// Some resources like ConfigMap may not have health status when they are okay
+			actual = health.HealthStatusHealthy
+		}
 		return simple(actual == expected, fmt.Sprintf("resource '%s/%s' health should be %s, is %s", kind, resource, expected, actual))
 	}
 }
+
 func ResourceResultNumbering(num int) Expectation {
 	return func(c *Consequences) (state, string) {
+		if c.app().Status.OperationState == nil || c.app().Status.OperationState.SyncResult == nil {
+			return pending, "no sync result yet"
+		}
 		actualNum := len(c.app().Status.OperationState.SyncResult.Resources)
 		if actualNum < num {
 			return pending, fmt.Sprintf("not enough results yet, want %d, got %d", num, actualNum)
 		} else if actualNum == num {
 			return succeeded, fmt.Sprintf("right number of results, want %d, got %d", num, actualNum)
-		} else {
-			return failed, fmt.Sprintf("too many results, want %d, got %d", num, actualNum)
 		}
+		return failed, fmt.Sprintf("too many results, want %d, got %d", num, actualNum)
 	}
 }
 
-func ResourceResultIs(result ResourceResult) Expectation {
+func ResourceResultIs(result v1alpha1.ResourceResult) Expectation {
 	return func(c *Consequences) (state, string) {
+		if c.app().Status.OperationState == nil || c.app().Status.OperationState.SyncResult == nil {
+			return pending, "no sync result yet"
+		}
 		results := c.app().Status.OperationState.SyncResult.Resources
 		for _, res := range results {
-			if *res == result {
+			if reflect.DeepEqual(*res, result) {
 				return succeeded, fmt.Sprintf("found resource result %v", result)
 			}
 		}
@@ -143,7 +310,7 @@ func ResourceResultIs(result ResourceResult) Expectation {
 	}
 }
 
-func sameResourceResult(res1, res2 ResourceResult) bool {
+func sameResourceResult(res1, res2 v1alpha1.ResourceResult) bool {
 	return res1.Kind == res2.Kind &&
 		res1.Group == res2.Group &&
 		res1.Namespace == res2.Namespace &&
@@ -153,8 +320,11 @@ func sameResourceResult(res1, res2 ResourceResult) bool {
 		res1.HookPhase == res2.HookPhase
 }
 
-func ResourceResultMatches(result ResourceResult) Expectation {
+func ResourceResultMatches(result v1alpha1.ResourceResult) Expectation {
 	return func(c *Consequences) (state, string) {
+		if c.app().Status.OperationState == nil || c.app().Status.OperationState.SyncResult == nil {
+			return pending, "no sync result yet"
+		}
 		results := c.app().Status.OperationState.SyncResult.Resources
 		for _, res := range results {
 			if sameResourceResult(*res, result) {
@@ -172,7 +342,7 @@ func DoesNotExist() Expectation {
 	return func(c *Consequences) (state, string) {
 		_, err := c.get()
 		if err != nil {
-			if apierr.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				return succeeded, "app does not exist"
 			}
 			return failed, err.Error()
@@ -181,9 +351,32 @@ func DoesNotExist() Expectation {
 	}
 }
 
-func Pod(predicate func(p v1.Pod) bool) Expectation {
+func DoesNotExistNow() Expectation {
 	return func(c *Consequences) (state, string) {
-		pods, err := pods()
+		_, err := c.get()
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return succeeded, "app does not exist"
+			}
+			return failed, err.Error()
+		}
+		return failed, "app should not exist"
+	}
+}
+
+func App(predicate func(app *v1alpha1.Application) bool) Expectation {
+	return func(c *Consequences) (state, string) {
+		app := c.app().DeepCopy()
+		if predicate(app) {
+			return succeeded, "app predicate matches"
+		}
+		return pending, "app predicate does not match"
+	}
+}
+
+func Pod(predicate func(p corev1.Pod) bool) Expectation {
+	return func(c *Consequences) (state, string) {
+		pods, err := pods(c.context.DeploymentNamespace())
 		if err != nil {
 			return failed, err.Error()
 		}
@@ -196,9 +389,9 @@ func Pod(predicate func(p v1.Pod) bool) Expectation {
 	}
 }
 
-func NotPod(predicate func(p v1.Pod) bool) Expectation {
+func NotPod(predicate func(p corev1.Pod) bool) Expectation {
 	return func(c *Consequences) (state, string) {
-		pods, err := pods()
+		pods, err := pods(c.context.DeploymentNamespace())
 		if err != nil {
 			return failed, err.Error()
 		}
@@ -211,18 +404,59 @@ func NotPod(predicate func(p v1.Pod) bool) Expectation {
 	}
 }
 
-func pods() (*v1.PodList, error) {
-	fixture.KubeClientset.CoreV1()
-	pods, err := fixture.KubeClientset.CoreV1().Pods(fixture.DeploymentNamespace()).List(context.Background(), metav1.ListOptions{})
+// ResourceTreeNode checks that the app resource tree has a node matching the predicate
+func ResourceTreeNode(predicate func(node v1alpha1.ResourceNode) bool) Expectation {
+	return resourceTreeNode(predicate, succeeded, pending)
+}
+
+// NotResourceTreeNode checks that the app resource tree has no node matching the predicate
+func NotResourceTreeNode(predicate func(node v1alpha1.ResourceNode) bool) Expectation {
+	return resourceTreeNode(predicate, pending, succeeded)
+}
+
+// resourceTreeNode looks for a node matching the predicate in the app resource tree and reports
+// whenMatched if one is found, whenNotMatched otherwise.
+func resourceTreeNode(predicate func(node v1alpha1.ResourceNode) bool, whenMatched, whenNotMatched state) Expectation {
+	return func(c *Consequences) (state, string) {
+		tree, err := c.resourceTree()
+		if err != nil {
+			return failed, err.Error()
+		}
+		for _, node := range tree.Nodes {
+			if predicate(node) {
+				return whenMatched, fmt.Sprintf("resource tree node predicate matched node named '%s'", node.Name)
+			}
+		}
+		return whenNotMatched, "resource tree node predicate did not match any node"
+	}
+}
+
+func pods(namespace string) (*corev1.PodList, error) {
+	pods, err := fixture.KubeClientset.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
 	return pods, err
 }
 
-func Event(reason string, message string) Expectation {
+func NoNamespace(name string) Expectation {
+	return func(_ *Consequences) (state, string) {
+		_, err := namespace(name)
+		if err != nil {
+			return succeeded, "namespace not found"
+		}
+
+		return failed, "found namespace " + name
+	}
+}
+
+func namespace(name string) (*corev1.Namespace, error) {
+	return fixture.KubeClientset.CoreV1().Namespaces().Get(context.Background(), name, metav1.GetOptions{})
+}
+
+func event(namespace string, reason string, message string) Expectation {
 	return func(c *Consequences) (state, string) {
-		list, err := fixture.KubeClientset.CoreV1().Events(fixture.ArgoCDNamespace).List(context.Background(), metav1.ListOptions{
+		list, err := fixture.KubeClientset.CoreV1().Events(namespace).List(context.Background(), metav1.ListOptions{
 			FieldSelector: fields.SelectorFromSet(map[string]string{
-				"involvedObject.name":      c.context.name,
-				"involvedObject.namespace": fixture.ArgoCDNamespace,
+				"involvedObject.name":      c.context.AppName(),
+				"involvedObject.namespace": namespace,
 			}).String(),
 		})
 		if err != nil {
@@ -239,31 +473,75 @@ func Event(reason string, message string) Expectation {
 	}
 }
 
-// asserts that the last command was successful
-func Success(message string) Expectation {
+func Event(reason string, message string) Expectation {
+	return event(fixture.TestNamespace(), reason, message)
+}
+
+func NamespacedEvent(namespace string, reason string, message string) Expectation {
+	return event(namespace, reason, message)
+}
+
+// Success asserts that the last command was successful and that the output contains the given message.
+func Success(message string, matchers ...func(string, string) bool) Expectation {
+	if len(matchers) == 0 {
+		matchers = append(matchers, strings.Contains)
+	}
+	match := func(actual, expected string) bool {
+		for i := range matchers {
+			if !matchers[i](actual, expected) {
+				return false
+			}
+		}
+		return true
+	}
 	return func(c *Consequences) (state, string) {
 		if c.actions.lastError != nil {
-			return failed, "error"
+			return failed, fmt.Errorf("error: %w", c.actions.lastError).Error()
 		}
-		if !strings.Contains(c.actions.lastOutput, message) {
+		if !match(c.actions.lastOutput, message) {
 			return failed, fmt.Sprintf("output did not contain '%s'", message)
 		}
 		return succeeded, fmt.Sprintf("no error and output contained '%s'", message)
 	}
 }
 
-// asserts that the last command was an error with substring match
-func Error(message, err string) Expectation {
+// Error asserts that the last command was an error with substring match
+func Error(message, err string, matchers ...func(string, string) bool) Expectation {
+	if len(matchers) == 0 {
+		matchers = append(matchers, strings.Contains)
+	}
+	match := func(actual, expected string) bool {
+		for i := range matchers {
+			if !matchers[i](actual, expected) {
+				return false
+			}
+		}
+		return true
+	}
 	return func(c *Consequences) (state, string) {
 		if c.actions.lastError == nil {
 			return failed, "no error"
 		}
-		if !strings.Contains(c.actions.lastOutput, message) {
+		if !match(c.actions.lastOutput, message) {
 			return failed, fmt.Sprintf("output does not contain '%s'", message)
 		}
-		if !strings.Contains(c.actions.lastError.Error(), err) {
-			return failed, fmt.Sprintf("error does not contain '%s'", message)
+		if !match(c.actions.lastError.Error(), err) {
+			return failed, fmt.Sprintf("error does not contain '%s'", err)
 		}
 		return succeeded, fmt.Sprintf("error '%s'", message)
 	}
+}
+
+// ErrorRegex asserts that the last command was an error that matches given regex epxression
+func ErrorRegex(messagePattern, err string) Expectation {
+	return Error(messagePattern, err, func(actual, expected string) bool {
+		return regexp.MustCompile(expected).MatchString(actual)
+	})
+}
+
+// SuccessRegex asserts that the last command was successful and output matches given regex expression
+func SuccessRegex(messagePattern string) Expectation {
+	return Success(messagePattern, func(actual, expected string) bool {
+		return regexp.MustCompile(expected).MatchString(actual)
+	})
 }

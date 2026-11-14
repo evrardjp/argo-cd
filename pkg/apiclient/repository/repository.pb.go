@@ -10,16 +10,14 @@ package repository
 import (
 	context "context"
 	fmt "fmt"
-	v1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
-	apiclient "github.com/argoproj/argo-cd/v2/reposerver/apiclient"
-	_ "github.com/gogo/protobuf/gogoproto"
+	v1alpha1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	apiclient "github.com/argoproj/argo-cd/v3/reposerver/apiclient"
 	proto "github.com/gogo/protobuf/proto"
 	_ "google.golang.org/genproto/googleapis/api/annotations"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
 	io "io"
-	_ "k8s.io/api/core/v1"
 	math "math"
 	math_bits "math/bits"
 )
@@ -39,6 +37,8 @@ const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
 type RepoAppsQuery struct {
 	Repo                 string   `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
 	Revision             string   `protobuf:"bytes,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	AppName              string   `protobuf:"bytes,3,opt,name=appName,proto3" json:"appName,omitempty"`
+	AppProject           string   `protobuf:"bytes,4,opt,name=appProject,proto3" json:"appProject,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -87,6 +87,20 @@ func (m *RepoAppsQuery) GetRepo() string {
 func (m *RepoAppsQuery) GetRevision() string {
 	if m != nil {
 		return m.Revision
+	}
+	return ""
+}
+
+func (m *RepoAppsQuery) GetAppName() string {
+	if m != nil {
+		return m.AppName
+	}
+	return ""
+}
+
+func (m *RepoAppsQuery) GetAppProject() string {
+	if m != nil {
+		return m.AppProject
 	}
 	return ""
 }
@@ -149,11 +163,16 @@ func (m *AppInfo) GetPath() string {
 
 // RepoAppDetailsQuery contains query information for app details request
 type RepoAppDetailsQuery struct {
-	Source               *v1alpha1.ApplicationSource `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
-	AppName              string                      `protobuf:"bytes,2,opt,name=appName,proto3" json:"appName,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}                    `json:"-"`
-	XXX_unrecognized     []byte                      `json:"-"`
-	XXX_sizecache        int32                       `json:"-"`
+	Source     *v1alpha1.ApplicationSource `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	AppName    string                      `protobuf:"bytes,2,opt,name=appName,proto3" json:"appName,omitempty"`
+	AppProject string                      `protobuf:"bytes,3,opt,name=appProject,proto3" json:"appProject,omitempty"`
+	// source index (for multi source apps)
+	SourceIndex int32 `protobuf:"varint,4,opt,name=sourceIndex,proto3" json:"sourceIndex,omitempty"`
+	// versionId from historical data (for multi source apps)
+	VersionId            int32    `protobuf:"varint,5,opt,name=versionId,proto3" json:"versionId,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
 }
 
 func (m *RepoAppDetailsQuery) Reset()         { *m = RepoAppDetailsQuery{} }
@@ -201,6 +220,27 @@ func (m *RepoAppDetailsQuery) GetAppName() string {
 		return m.AppName
 	}
 	return ""
+}
+
+func (m *RepoAppDetailsQuery) GetAppProject() string {
+	if m != nil {
+		return m.AppProject
+	}
+	return ""
+}
+
+func (m *RepoAppDetailsQuery) GetSourceIndex() int32 {
+	if m != nil {
+		return m.SourceIndex
+	}
+	return 0
+}
+
+func (m *RepoAppDetailsQuery) GetVersionId() int32 {
+	if m != nil {
+		return m.VersionId
+	}
+	return 0
 }
 
 // RepoAppsResponse contains applications of specified repository
@@ -256,7 +296,9 @@ type RepoQuery struct {
 	// Repo URL for query
 	Repo string `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
 	// Whether to force a cache refresh on repo's connection state
-	ForceRefresh         bool     `protobuf:"varint,2,opt,name=forceRefresh,proto3" json:"forceRefresh,omitempty"`
+	ForceRefresh bool `protobuf:"varint,2,opt,name=forceRefresh,proto3" json:"forceRefresh,omitempty"`
+	// App project for query
+	AppProject           string   `protobuf:"bytes,3,opt,name=appProject,proto3" json:"appProject,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -309,6 +351,13 @@ func (m *RepoQuery) GetForceRefresh() bool {
 	return false
 }
 
+func (m *RepoQuery) GetAppProject() string {
+	if m != nil {
+		return m.AppProject
+	}
+	return ""
+}
+
 // RepoAccessQuery is a query for checking access to a repo
 type RepoAccessQuery struct {
 	// The URL to the repo
@@ -338,10 +387,32 @@ type RepoAccessQuery struct {
 	// Github App Installation ID of the installed GitHub App
 	GithubAppInstallationID int64 `protobuf:"varint,14,opt,name=githubAppInstallationID,proto3" json:"githubAppInstallationID,omitempty"`
 	// Github App Enterprise base url if empty will default to https://api.github.com
-	GithubAppEnterpriseBaseUrl string   `protobuf:"bytes,15,opt,name=githubAppEnterpriseBaseUrl,proto3" json:"githubAppEnterpriseBaseUrl,omitempty"`
-	XXX_NoUnkeyedLiteral       struct{} `json:"-"`
-	XXX_unrecognized           []byte   `json:"-"`
-	XXX_sizecache              int32    `json:"-"`
+	GithubAppEnterpriseBaseUrl string `protobuf:"bytes,15,opt,name=githubAppEnterpriseBaseUrl,proto3" json:"githubAppEnterpriseBaseUrl,omitempty"`
+	// HTTP/HTTPS proxy to access the repository
+	Proxy string `protobuf:"bytes,16,opt,name=proxy,proto3" json:"proxy,omitempty"`
+	// Reference between project and repository that allow you automatically to be added as item inside SourceRepos project entity
+	Project string `protobuf:"bytes,17,opt,name=project,proto3" json:"project,omitempty"`
+	// Google Cloud Platform service account key
+	GcpServiceAccountKey string `protobuf:"bytes,18,opt,name=gcpServiceAccountKey,proto3" json:"gcpServiceAccountKey,omitempty"`
+	// Whether to force HTTP basic auth
+	ForceHttpBasicAuth bool `protobuf:"varint,19,opt,name=forceHttpBasicAuth,proto3" json:"forceHttpBasicAuth,omitempty"`
+	// Whether to use azure workload identity for authentication
+	UseAzureWorkloadIdentity bool `protobuf:"varint,20,opt,name=useAzureWorkloadIdentity,proto3" json:"useAzureWorkloadIdentity,omitempty"`
+	// BearerToken contains the bearer token used for Git auth at the repo server
+	BearerToken string `protobuf:"bytes,21,opt,name=bearerToken,proto3" json:"bearerToken,omitempty"`
+	// Whether https should be disabled for an OCI repo
+	InsecureOciForceHttp bool `protobuf:"varint,22,opt,name=insecureOciForceHttp,proto3" json:"insecureOciForceHttp,omitempty"`
+	// Azure Service Principal Client ID
+	AzureServicePrincipalClientId string `protobuf:"bytes,23,opt,name=azureServicePrincipalClientId,proto3" json:"azureServicePrincipalClientId,omitempty"`
+	// Azure Service Principal Client Secret
+	AzureServicePrincipalClientSecret string `protobuf:"bytes,24,opt,name=azureServicePrincipalClientSecret,proto3" json:"azureServicePrincipalClientSecret,omitempty"`
+	// Azure Service Principal Tenant ID
+	AzureServicePrincipalTenantId string `protobuf:"bytes,25,opt,name=azureServicePrincipalTenantId,proto3" json:"azureServicePrincipalTenantId,omitempty"`
+	// Azure Active Directory Endpoint
+	AzureActiveDirectoryEndpoint string   `protobuf:"bytes,26,opt,name=azureActiveDirectoryEndpoint,proto3" json:"azureActiveDirectoryEndpoint,omitempty"`
+	XXX_NoUnkeyedLiteral         struct{} `json:"-"`
+	XXX_unrecognized             []byte   `json:"-"`
+	XXX_sizecache                int32    `json:"-"`
 }
 
 func (m *RepoAccessQuery) Reset()         { *m = RepoAccessQuery{} }
@@ -471,6 +542,83 @@ func (m *RepoAccessQuery) GetGithubAppInstallationID() int64 {
 func (m *RepoAccessQuery) GetGithubAppEnterpriseBaseUrl() string {
 	if m != nil {
 		return m.GithubAppEnterpriseBaseUrl
+	}
+	return ""
+}
+
+func (m *RepoAccessQuery) GetProxy() string {
+	if m != nil {
+		return m.Proxy
+	}
+	return ""
+}
+
+func (m *RepoAccessQuery) GetProject() string {
+	if m != nil {
+		return m.Project
+	}
+	return ""
+}
+
+func (m *RepoAccessQuery) GetGcpServiceAccountKey() string {
+	if m != nil {
+		return m.GcpServiceAccountKey
+	}
+	return ""
+}
+
+func (m *RepoAccessQuery) GetForceHttpBasicAuth() bool {
+	if m != nil {
+		return m.ForceHttpBasicAuth
+	}
+	return false
+}
+
+func (m *RepoAccessQuery) GetUseAzureWorkloadIdentity() bool {
+	if m != nil {
+		return m.UseAzureWorkloadIdentity
+	}
+	return false
+}
+
+func (m *RepoAccessQuery) GetBearerToken() string {
+	if m != nil {
+		return m.BearerToken
+	}
+	return ""
+}
+
+func (m *RepoAccessQuery) GetInsecureOciForceHttp() bool {
+	if m != nil {
+		return m.InsecureOciForceHttp
+	}
+	return false
+}
+
+func (m *RepoAccessQuery) GetAzureServicePrincipalClientId() string {
+	if m != nil {
+		return m.AzureServicePrincipalClientId
+	}
+	return ""
+}
+
+func (m *RepoAccessQuery) GetAzureServicePrincipalClientSecret() string {
+	if m != nil {
+		return m.AzureServicePrincipalClientSecret
+	}
+	return ""
+}
+
+func (m *RepoAccessQuery) GetAzureServicePrincipalTenantId() string {
+	if m != nil {
+		return m.AzureServicePrincipalTenantId
+	}
+	return ""
+}
+
+func (m *RepoAccessQuery) GetAzureActiveDirectoryEndpoint() string {
+	if m != nil {
+		return m.AzureActiveDirectoryEndpoint
 	}
 	return ""
 }
@@ -645,75 +793,99 @@ func init() {
 }
 
 var fileDescriptor_8d38260443475705 = []byte{
-	// 1082 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xbc, 0x57, 0x5d, 0x6f, 0xdc, 0x44,
-	0x17, 0x96, 0x93, 0x74, 0x93, 0x4c, 0x3e, 0xba, 0x9d, 0xf4, 0xed, 0x6b, 0xb6, 0x69, 0x1a, 0x4d,
-	0x4b, 0x15, 0xa2, 0x62, 0x37, 0x8b, 0x10, 0x55, 0x11, 0xa0, 0x34, 0x89, 0xda, 0x88, 0x88, 0x80,
-	0xab, 0x70, 0x81, 0x40, 0x68, 0xe2, 0x3d, 0xd9, 0x35, 0xf1, 0x7a, 0xa6, 0x33, 0xb3, 0x46, 0x51,
-	0xd5, 0x1b, 0xae, 0x90, 0x80, 0x0b, 0x84, 0x90, 0x7a, 0xc7, 0x0d, 0x12, 0x17, 0xfc, 0x11, 0x2e,
-	0x91, 0xf8, 0x03, 0x28, 0xe2, 0x77, 0x20, 0x34, 0x33, 0x5e, 0xdb, 0x9b, 0xfd, 0x48, 0x2a, 0x42,
-	0xee, 0x66, 0x9e, 0x73, 0xe6, 0x9c, 0xe7, 0x3c, 0x3e, 0x73, 0x6c, 0x23, 0x22, 0x41, 0xa4, 0x20,
-	0x7c, 0x01, 0x9c, 0xc9, 0x48, 0x31, 0x71, 0x54, 0x5a, 0x7a, 0x5c, 0x30, 0xc5, 0x30, 0x2a, 0x90,
-	0xda, 0xd5, 0x26, 0x6b, 0x32, 0x03, 0xfb, 0x7a, 0x65, 0x3d, 0x6a, 0x8b, 0x4d, 0xc6, 0x9a, 0x31,
-	0xf8, 0x94, 0x47, 0x3e, 0x4d, 0x12, 0xa6, 0xa8, 0x8a, 0x58, 0x22, 0x33, 0x2b, 0x39, 0xbc, 0x2f,
-	0xbd, 0x88, 0x19, 0x6b, 0xc8, 0x04, 0xf8, 0xe9, 0x9a, 0xdf, 0x84, 0x04, 0x04, 0x55, 0xd0, 0xc8,
-	0x7c, 0x76, 0x9a, 0x91, 0x6a, 0x75, 0xf6, 0xbd, 0x90, 0xb5, 0x7d, 0x2a, 0x4c, 0x8a, 0x2f, 0xcc,
-	0xe2, 0xf5, 0xb0, 0xe1, 0xa7, 0x75, 0x9f, 0x1f, 0x36, 0xf5, 0x79, 0xe9, 0x53, 0xce, 0xe3, 0x28,
-	0x34, 0xf1, 0xfd, 0x74, 0x8d, 0xc6, 0xbc, 0x45, 0xfb, 0xa3, 0x6d, 0x9d, 0x12, 0xcd, 0x14, 0x74,
-	0x6a, 0xe1, 0xe4, 0x3d, 0x34, 0x17, 0x00, 0x67, 0xeb, 0x9c, 0xcb, 0x8f, 0x3a, 0x20, 0x8e, 0x30,
-	0x46, 0x13, 0xda, 0xc9, 0x75, 0x96, 0x9d, 0x95, 0xe9, 0xc0, 0xac, 0x71, 0x0d, 0x4d, 0x09, 0x48,
-	0x23, 0x19, 0xb1, 0xc4, 0x1d, 0x33, 0x78, 0xbe, 0x27, 0x6b, 0x68, 0x72, 0x9d, 0xf3, 0xed, 0xe4,
-	0x80, 0xe9, 0xa3, 0xea, 0x88, 0x43, 0xf7, 0xa8, 0x5e, 0x6b, 0x8c, 0x53, 0xd5, 0xca, 0x8e, 0x99,
-	0x35, 0x79, 0xe1, 0xa0, 0x85, 0x2c, 0xe9, 0x26, 0x28, 0x1a, 0xc5, 0x59, 0xea, 0x26, 0xaa, 0x48,
-	0xd6, 0x11, 0xa1, 0x8d, 0x30, 0x53, 0xdf, 0xf5, 0x8a, 0x1a, 0xbd, 0x6e, 0x8d, 0x66, 0xf1, 0x79,
-	0xd8, 0xf0, 0xd2, 0xba, 0xc7, 0x0f, 0x9b, 0x9e, 0x56, 0xcc, 0x2b, 0x29, 0xe6, 0x75, 0x15, 0xf3,
-	0xd6, 0x0b, 0xf0, 0x89, 0x09, 0x1b, 0x64, 0xe1, 0xb1, 0x8b, 0x26, 0x29, 0xe7, 0x1f, 0xd0, 0x36,
-	0x64, 0xbc, 0xba, 0x5b, 0xf2, 0x0e, 0xaa, 0x76, 0xe5, 0x08, 0x40, 0x72, 0x96, 0x48, 0xc0, 0xaf,
-	0xa1, 0x4b, 0x91, 0x82, 0xb6, 0x74, 0x9d, 0xe5, 0xf1, 0x95, 0x99, 0xfa, 0x82, 0x57, 0x12, 0x31,
-	0x2b, 0x3d, 0xb0, 0x1e, 0x64, 0x03, 0x4d, 0xeb, 0xe3, 0xc3, 0x95, 0x24, 0x68, 0xf6, 0x80, 0x69,
-	0x2a, 0x70, 0x20, 0x40, 0x5a, 0x59, 0xa6, 0x82, 0x1e, 0x8c, 0x7c, 0x37, 0x81, 0x2e, 0x1b, 0x12,
-	0x61, 0x08, 0x72, 0xf4, 0x53, 0xe9, 0x48, 0x10, 0x49, 0x51, 0x46, 0xbe, 0xd7, 0x36, 0x4e, 0xa5,
-	0xfc, 0x92, 0x89, 0x86, 0x3b, 0x6e, 0x6d, 0xdd, 0x3d, 0xbe, 0x8d, 0xe6, 0xa4, 0x6c, 0x7d, 0x28,
-	0xa2, 0x94, 0x2a, 0x78, 0x1f, 0x8e, 0xdc, 0x09, 0xe3, 0xd0, 0x0b, 0xea, 0x08, 0x51, 0x22, 0x21,
-	0xec, 0x08, 0x70, 0x2f, 0x19, 0x96, 0xf9, 0x1e, 0xdf, 0x45, 0x57, 0x54, 0x2c, 0x37, 0xe2, 0x08,
-	0x12, 0xb5, 0x01, 0x42, 0x6d, 0x52, 0x45, 0xdd, 0x8a, 0x89, 0xd2, 0x6f, 0xc0, 0xab, 0xa8, 0xda,
-	0x03, 0xea, 0x94, 0x93, 0xc6, 0xb9, 0x0f, 0xcf, 0x5b, 0x68, 0xba, 0xb7, 0x85, 0x4c, 0x8d, 0xc8,
-	0x62, 0xa6, 0xbe, 0x45, 0x34, 0x0d, 0x09, 0xdd, 0x8f, 0x61, 0x37, 0x8c, 0xdc, 0x19, 0x43, 0xaf,
-	0x00, 0xf0, 0x3d, 0xb4, 0x60, 0x3b, 0x67, 0x9d, 0xf3, 0x52, 0x9d, 0xb3, 0x26, 0xc0, 0x20, 0x13,
-	0x5e, 0x46, 0x33, 0x39, 0xbc, 0xbd, 0xe9, 0xce, 0x2d, 0x3b, 0x2b, 0xe3, 0x41, 0x19, 0xc2, 0xf7,
-	0xd1, 0xff, 0x8b, 0x6d, 0x22, 0x15, 0x8d, 0x63, 0xd3, 0x5a, 0xdb, 0x9b, 0xee, 0xbc, 0xf1, 0x1e,
-	0x66, 0xc6, 0xef, 0xa2, 0x5a, 0x6e, 0xda, 0x4a, 0x14, 0x08, 0x2e, 0x22, 0x09, 0x0f, 0xa9, 0x84,
-	0x3d, 0x11, 0xbb, 0x97, 0x0d, 0xa9, 0x11, 0x1e, 0x64, 0x1e, 0xcd, 0xea, 0x76, 0xe8, 0xf6, 0x23,
-	0xf9, 0xc5, 0x41, 0x57, 0x34, 0xb0, 0x21, 0x80, 0x2a, 0x08, 0xe0, 0x69, 0x07, 0xa4, 0xc2, 0x9f,
-	0x96, 0x3a, 0x64, 0xa6, 0xfe, 0xf8, 0xdf, 0x5d, 0x9d, 0x20, 0xef, 0xf0, 0xac, 0xd7, 0xae, 0xa1,
-	0x4a, 0x87, 0x4b, 0x10, 0x2a, 0xeb, 0xd8, 0x6c, 0xa7, 0x9f, 0x43, 0x28, 0xa0, 0x21, 0x77, 0x93,
-	0xf8, 0xc8, 0x34, 0xda, 0x54, 0x50, 0x00, 0xe4, 0xa9, 0x25, 0xba, 0xc7, 0x1b, 0x17, 0x45, 0xb4,
-	0xfe, 0xf7, 0xbc, 0xcd, 0x69, 0xc1, 0x27, 0x20, 0xd2, 0x28, 0x04, 0xfc, 0xad, 0x83, 0x26, 0x76,
-	0x22, 0xa9, 0xf0, 0xff, 0xca, 0x97, 0x37, 0xbf, 0xaa, 0xb5, 0x9d, 0xf3, 0x62, 0xa1, 0x93, 0x90,
-	0x9b, 0x5f, 0xfd, 0xf1, 0xd7, 0x0f, 0x63, 0xd7, 0xf0, 0x55, 0xf3, 0x3a, 0x48, 0xd7, 0x8a, 0xa9,
-	0x1b, 0x81, 0xfc, 0x7a, 0xcc, 0xc1, 0xdf, 0x38, 0x68, 0xfc, 0x11, 0x0c, 0x65, 0x73, 0x6e, 0x9a,
-	0x90, 0x5b, 0x86, 0xc9, 0x0d, 0x7c, 0x7d, 0x10, 0x13, 0xff, 0x99, 0xde, 0x3d, 0xc7, 0x3f, 0x3a,
-	0xa8, 0xaa, 0x79, 0x07, 0x25, 0xdb, 0xc5, 0x08, 0xb5, 0x38, 0x4a, 0x28, 0xfc, 0x19, 0x9a, 0xb2,
-	0xb4, 0x0e, 0x86, 0xd2, 0xa9, 0xf6, 0xc2, 0x07, 0x92, 0xac, 0x98, 0x90, 0x04, 0x2f, 0x8f, 0xa8,
-	0xd8, 0x17, 0x3a, 0x64, 0xdb, 0x86, 0xd7, 0xa3, 0x1e, 0xbf, 0x72, 0x32, 0x7c, 0xfe, 0x3e, 0xac,
-	0x2d, 0x0e, 0x32, 0xe5, 0x77, 0xf1, 0x4c, 0xe9, 0xa8, 0x4e, 0xf1, 0xbd, 0x83, 0xe6, 0x1e, 0x81,
-	0x2a, 0xde, 0x79, 0xf8, 0xe6, 0x80, 0xc8, 0xe5, 0xf7, 0x61, 0x8d, 0x0c, 0x77, 0xc8, 0x09, 0xbc,
-	0x6d, 0x08, 0xbc, 0x49, 0xee, 0x0d, 0x26, 0x60, 0x5f, 0x78, 0x26, 0xce, 0x5e, 0xb0, 0x63, 0xa8,
-	0x34, 0x6c, 0x84, 0x07, 0xce, 0x2a, 0x4e, 0x0d, 0xa5, 0xc7, 0x10, 0xb7, 0x37, 0x5a, 0x54, 0xa8,
-	0xa1, 0x32, 0x2f, 0x95, 0xe1, 0xc2, 0x3d, 0x27, 0xe1, 0x19, 0x12, 0x2b, 0xf8, 0xce, 0x28, 0x15,
-	0x5a, 0x10, 0xb7, 0x43, 0x9b, 0xe6, 0x85, 0x83, 0x2a, 0x76, 0x7a, 0xe1, 0x1b, 0x27, 0x33, 0xf6,
-	0x4c, 0xb5, 0x73, 0xbc, 0x0a, 0xaf, 0x1a, 0x8e, 0x8b, 0x64, 0x60, 0xaf, 0x3d, 0x30, 0xc3, 0x43,
-	0x5f, 0xcd, 0x9f, 0x1c, 0x54, 0xed, 0x52, 0xe8, 0x9e, 0xbd, 0x38, 0x92, 0xe4, 0x74, 0x92, 0xf8,
-	0x67, 0x07, 0x55, 0xec, 0x44, 0xed, 0xe7, 0xd5, 0x33, 0x69, 0xcf, 0x91, 0xd7, 0x9a, 0x7d, 0xc0,
-	0xb5, 0x11, 0x6d, 0x6e, 0xa8, 0x3c, 0x2f, 0x84, 0xfc, 0xd5, 0x41, 0xd5, 0x2e, 0x9d, 0xe1, 0x42,
-	0xfe, 0x57, 0x84, 0xbd, 0x97, 0x23, 0x8c, 0x29, 0xaa, 0x6c, 0x42, 0x0c, 0x0a, 0x86, 0x5d, 0x01,
-	0xf7, 0x24, 0x9c, 0x37, 0xff, 0x1d, 0x3b, 0x63, 0x57, 0x47, 0xcd, 0x58, 0x2d, 0x48, 0x0b, 0x55,
-	0x6d, 0x8a, 0x92, 0x1e, 0x2f, 0x9d, 0xec, 0xd6, 0x19, 0x92, 0xe1, 0x67, 0x68, 0xfe, 0x63, 0x1a,
-	0x47, 0x5a, 0x59, 0xfb, 0x0d, 0x89, 0xaf, 0xf7, 0x4d, 0x92, 0xe2, 0xdb, 0x72, 0x44, 0xb6, 0xba,
-	0xc9, 0x76, 0x97, 0xdc, 0x1e, 0x75, 0xaf, 0xd3, 0x2c, 0x95, 0x55, 0xf2, 0xe1, 0xd6, 0x6f, 0xc7,
-	0x4b, 0xce, 0xef, 0xc7, 0x4b, 0xce, 0x9f, 0xc7, 0x4b, 0xce, 0x27, 0x6f, 0x9d, 0xed, 0x9f, 0x27,
-	0x34, 0x1f, 0x81, 0xa5, 0xbf, 0x93, 0xfd, 0x8a, 0xf9, 0x3d, 0x79, 0xe3, 0x9f, 0x00, 0x00, 0x00,
-	0xff, 0xff, 0xcf, 0x15, 0x31, 0xd4, 0xbd, 0x0d, 0x00, 0x00,
+	// 1466 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xbc, 0x58, 0x51, 0x6f, 0x1b, 0xc5,
+	0x13, 0xd7, 0x25, 0x4d, 0x9a, 0x6c, 0x9a, 0xd6, 0xd9, 0x24, 0xed, 0xd5, 0x4d, 0xd3, 0xf4, 0xda,
+	0x7f, 0x94, 0x46, 0xed, 0xb9, 0x49, 0xff, 0x88, 0xaa, 0x08, 0x24, 0x27, 0x0e, 0xad, 0x45, 0x44,
+	0x8a, 0xdb, 0x52, 0x09, 0x81, 0xd0, 0xe6, 0x3c, 0xb1, 0xb7, 0xb9, 0xdc, 0x6d, 0x77, 0xd7, 0x6e,
+	0x4d, 0xd5, 0x17, 0x84, 0x10, 0x12, 0xbc, 0x20, 0x04, 0xe2, 0x0d, 0x1e, 0x90, 0x90, 0xe0, 0x9d,
+	0xcf, 0xc0, 0x23, 0x88, 0x2f, 0x80, 0x2a, 0x3e, 0x04, 0x8f, 0x68, 0xe7, 0xce, 0x3e, 0x3b, 0xb1,
+	0xcf, 0x89, 0x9a, 0xe6, 0xed, 0x76, 0x66, 0x6e, 0x7e, 0xbf, 0xf9, 0xed, 0xdc, 0xec, 0xda, 0xc4,
+	0x51, 0x20, 0xeb, 0x20, 0x73, 0x12, 0x44, 0xa8, 0xb8, 0x0e, 0x65, 0xa3, 0xed, 0xd1, 0x15, 0x32,
+	0xd4, 0x21, 0x25, 0x89, 0x25, 0x3b, 0x53, 0x09, 0xc3, 0x8a, 0x0f, 0x39, 0x26, 0x78, 0x8e, 0x05,
+	0x41, 0xa8, 0x99, 0xe6, 0x61, 0xa0, 0xa2, 0xc8, 0xec, 0x7a, 0x85, 0xeb, 0x6a, 0x6d, 0xd3, 0xf5,
+	0xc2, 0x9d, 0x1c, 0x93, 0x95, 0x50, 0xc8, 0xf0, 0x11, 0x3e, 0x5c, 0xf3, 0xca, 0xb9, 0xfa, 0x8d,
+	0x9c, 0xd8, 0xae, 0x98, 0x37, 0x55, 0x8e, 0x09, 0xe1, 0x73, 0x0f, 0xdf, 0xcd, 0xd5, 0x97, 0x98,
+	0x2f, 0xaa, 0x6c, 0x29, 0x57, 0x81, 0x00, 0x24, 0xd3, 0x50, 0x8e, 0xb3, 0xad, 0xf5, 0xc9, 0x86,
+	0xb4, 0xfa, 0xd2, 0x77, 0x1a, 0x64, 0xbc, 0x04, 0x22, 0xcc, 0x0b, 0xa1, 0xde, 0xab, 0x81, 0x6c,
+	0x50, 0x4a, 0x8e, 0x99, 0x20, 0xdb, 0x9a, 0xb3, 0x16, 0x46, 0x4b, 0xf8, 0x4c, 0xb3, 0x64, 0x44,
+	0x42, 0x9d, 0x2b, 0x1e, 0x06, 0xf6, 0x00, 0xda, 0x5b, 0x6b, 0x6a, 0x93, 0xe3, 0x4c, 0x88, 0x77,
+	0xd9, 0x0e, 0xd8, 0x83, 0xe8, 0x6a, 0x2e, 0xe9, 0x2c, 0x21, 0x4c, 0x88, 0xbb, 0x32, 0x7c, 0x04,
+	0x9e, 0xb6, 0x8f, 0xa1, 0xb3, 0xcd, 0xe2, 0x2c, 0x91, 0xe3, 0x79, 0x21, 0x8a, 0xc1, 0x56, 0x68,
+	0x40, 0x75, 0x43, 0x40, 0x13, 0xd4, 0x3c, 0x1b, 0x9b, 0x60, 0xba, 0x1a, 0x03, 0xe2, 0xb3, 0xf3,
+	0xaf, 0x45, 0x26, 0x63, 0xba, 0x05, 0xd0, 0x8c, 0xfb, 0x31, 0xe9, 0x0a, 0x19, 0x56, 0x61, 0x4d,
+	0x7a, 0x51, 0x86, 0xb1, 0xe5, 0x0d, 0x37, 0x51, 0xc7, 0x6d, 0xaa, 0x83, 0x0f, 0x1f, 0x7b, 0x65,
+	0xb7, 0x7e, 0xc3, 0x15, 0xdb, 0x15, 0xd7, 0x68, 0xed, 0xb6, 0x69, 0xed, 0x36, 0xb5, 0x76, 0xf3,
+	0x89, 0xf1, 0x1e, 0xa6, 0x2d, 0xc5, 0xe9, 0xdb, 0xab, 0x1d, 0x48, 0xab, 0x76, 0x70, 0x77, 0xb5,
+	0x74, 0x8e, 0x8c, 0x45, 0x39, 0x8a, 0x41, 0x19, 0x9e, 0xa2, 0x1c, 0x43, 0xa5, 0x76, 0x13, 0x9d,
+	0x21, 0xa3, 0x75, 0x90, 0x46, 0xd4, 0x62, 0xd9, 0x1e, 0x42, 0x7f, 0x62, 0x70, 0xde, 0x24, 0x99,
+	0xe6, 0x46, 0x95, 0x40, 0x89, 0x30, 0x50, 0x40, 0xaf, 0x90, 0x21, 0xae, 0x61, 0x47, 0xd9, 0xd6,
+	0xdc, 0xe0, 0xc2, 0xd8, 0xf2, 0xa4, 0xdb, 0xb6, 0xbd, 0xb1, 0xb4, 0xa5, 0x28, 0xc2, 0xf1, 0xc8,
+	0xa8, 0x79, 0xbd, 0xf7, 0x1e, 0x3b, 0xe4, 0xc4, 0x56, 0x68, 0x4a, 0x85, 0x2d, 0x09, 0x2a, 0x92,
+	0x7d, 0xa4, 0xd4, 0x61, 0xeb, 0x57, 0xa3, 0xf3, 0xe7, 0x08, 0x39, 0x85, 0x24, 0x3d, 0x0f, 0x54,
+	0x7a, 0x3f, 0xd5, 0x14, 0xc8, 0x20, 0x91, 0xb1, 0xb5, 0x36, 0x3e, 0xc1, 0x94, 0x7a, 0x12, 0xca,
+	0x72, 0x8c, 0xd0, 0x5a, 0xd3, 0xcb, 0x64, 0x5c, 0xa9, 0xea, 0x5d, 0xc9, 0xeb, 0x4c, 0xc3, 0x3b,
+	0xd0, 0x88, 0x9b, 0xaa, 0xd3, 0x68, 0x32, 0xf0, 0x40, 0x81, 0x57, 0x93, 0x80, 0x32, 0x8e, 0x94,
+	0x5a, 0x6b, 0x7a, 0x95, 0x4c, 0x68, 0x5f, 0xad, 0xfa, 0x1c, 0x02, 0xbd, 0x0a, 0x52, 0x17, 0x98,
+	0x66, 0xf6, 0x30, 0x66, 0xd9, 0xeb, 0xa0, 0x8b, 0x24, 0xd3, 0x61, 0x34, 0x90, 0xc7, 0x31, 0x78,
+	0x8f, 0xbd, 0xd5, 0xc2, 0xa3, 0x9d, 0x2d, 0x8c, 0x35, 0x92, 0xc8, 0x86, 0xf5, 0xcd, 0x90, 0x51,
+	0x08, 0xd8, 0xa6, 0x0f, 0x1b, 0x1e, 0xb7, 0xc7, 0x90, 0x5e, 0x62, 0xa0, 0xd7, 0xc9, 0x64, 0xd4,
+	0xb9, 0x79, 0x21, 0x92, 0x92, 0xec, 0x13, 0x98, 0xa0, 0x9b, 0xcb, 0xf4, 0x55, 0xcb, 0x5c, 0x2c,
+	0xd8, 0xe3, 0x73, 0xd6, 0xc2, 0x60, 0xa9, 0xdd, 0x44, 0x6f, 0x92, 0x33, 0xc9, 0x32, 0x50, 0x9a,
+	0xf9, 0x3e, 0xb6, 0x76, 0xb1, 0x60, 0x9f, 0xc4, 0xe8, 0x5e, 0x6e, 0xfa, 0x16, 0xc9, 0xb6, 0x5c,
+	0x6b, 0x81, 0x06, 0x29, 0x24, 0x57, 0xb0, 0xc2, 0x14, 0x3c, 0x90, 0xbe, 0x7d, 0x0a, 0x49, 0xa5,
+	0x44, 0xd0, 0x29, 0x32, 0x24, 0x64, 0xf8, 0xb4, 0x61, 0x67, 0x30, 0x34, 0x5a, 0x98, 0x6f, 0x48,
+	0xc4, 0x2d, 0x34, 0x11, 0x7d, 0x43, 0xf1, 0x92, 0x2e, 0x93, 0xa9, 0x8a, 0x27, 0xee, 0x81, 0xac,
+	0x73, 0x0f, 0xf2, 0x9e, 0x17, 0xd6, 0x02, 0xd4, 0x9c, 0x62, 0x58, 0x57, 0x1f, 0x75, 0x09, 0xc5,
+	0x1e, 0xbd, 0xa3, 0xb5, 0x58, 0x61, 0x8a, 0x7b, 0xf9, 0x9a, 0xae, 0xda, 0x93, 0x28, 0x6c, 0x17,
+	0x0f, 0xbd, 0x45, 0xec, 0x9a, 0x82, 0xfc, 0x27, 0x35, 0x09, 0x0f, 0x43, 0xb9, 0xed, 0x87, 0xac,
+	0x5c, 0x2c, 0x43, 0xa0, 0xb9, 0x6e, 0xd8, 0x53, 0xf8, 0x56, 0x4f, 0xbf, 0xd1, 0x7a, 0x13, 0x98,
+	0x04, 0x79, 0x3f, 0xdc, 0x86, 0xc0, 0x9e, 0x46, 0x5a, 0xed, 0x26, 0x53, 0x41, 0xb3, 0xd7, 0x36,
+	0x3c, 0xfe, 0x76, 0x13, 0xde, 0x3e, 0x8d, 0x99, 0xbb, 0xfa, 0x68, 0x81, 0x9c, 0x67, 0x06, 0x2e,
+	0xae, 0xed, 0xae, 0xe4, 0x81, 0xc7, 0x05, 0xf3, 0xa3, 0xfe, 0x2a, 0x96, 0xed, 0x33, 0x88, 0x93,
+	0x1e, 0x44, 0xd7, 0xc9, 0xc5, 0x94, 0x80, 0x7b, 0xe0, 0x49, 0xd0, 0xb6, 0x8d, 0x99, 0xfa, 0x07,
+	0xf6, 0xe4, 0x74, 0x1f, 0x02, 0x86, 0x9c, 0xce, 0xa6, 0x70, 0x6a, 0x06, 0xd1, 0x15, 0x32, 0x83,
+	0x01, 0x79, 0x4f, 0xf3, 0x3a, 0x14, 0xb8, 0x04, 0xcf, 0xcc, 0xa6, 0xb5, 0xa0, 0x2c, 0x42, 0x1e,
+	0x68, 0x3b, 0x8b, 0x49, 0x52, 0x63, 0x9c, 0x93, 0xe4, 0x84, 0x19, 0x29, 0xcd, 0x99, 0xe7, 0xfc,
+	0x6c, 0x91, 0x09, 0x63, 0x58, 0x95, 0xc0, 0x34, 0x94, 0xe0, 0x71, 0x0d, 0x94, 0xa6, 0x1f, 0xb6,
+	0x4d, 0x99, 0xb1, 0xe5, 0x3b, 0x2f, 0x37, 0xfe, 0x4b, 0xad, 0x29, 0x1a, 0xcf, 0xab, 0xd3, 0x64,
+	0xb8, 0x26, 0x14, 0x48, 0x1d, 0x4f, 0xc5, 0x78, 0x65, 0xbe, 0x65, 0x4f, 0x42, 0x59, 0x6d, 0x04,
+	0x7e, 0x03, 0x87, 0xd5, 0x48, 0x29, 0x31, 0x38, 0x8f, 0x23, 0xa2, 0x0f, 0x44, 0xf9, 0xa8, 0x88,
+	0x2e, 0x7f, 0x76, 0x86, 0x4c, 0x24, 0xc6, 0x78, 0x5f, 0xe8, 0x57, 0x16, 0x39, 0xb6, 0xce, 0x95,
+	0xa6, 0xd3, 0xed, 0x07, 0x44, 0xeb, 0x38, 0xc8, 0xae, 0x1f, 0x16, 0x0b, 0x03, 0xe2, 0x5c, 0xf8,
+	0xf4, 0xaf, 0x7f, 0xbe, 0x19, 0x38, 0x4d, 0xa7, 0xf0, 0x1a, 0x54, 0x5f, 0x4a, 0xee, 0x1c, 0x1c,
+	0xd4, 0x17, 0x03, 0x16, 0xfd, 0xd2, 0x22, 0x83, 0xb7, 0xa1, 0x27, 0x9b, 0x43, 0xd3, 0xc4, 0xb9,
+	0x84, 0x4c, 0xce, 0xd3, 0x73, 0xdd, 0x98, 0xe4, 0x9e, 0x99, 0xd5, 0x73, 0xfa, 0x9d, 0x45, 0x46,
+	0x6e, 0x83, 0x7e, 0x28, 0xb9, 0x86, 0x57, 0x4f, 0xe9, 0x0a, 0x52, 0xba, 0x44, 0x2f, 0x36, 0x29,
+	0x3d, 0x31, 0xb8, 0xd7, 0xba, 0x11, 0xfb, 0xd6, 0x22, 0x19, 0x23, 0x68, 0xa9, 0xcd, 0x77, 0x34,
+	0x3b, 0x38, 0x93, 0xb6, 0x83, 0xf4, 0x47, 0x8b, 0x4c, 0x9b, 0x30, 0x54, 0xec, 0xe8, 0xc9, 0x39,
+	0x48, 0x6e, 0x86, 0x66, 0x7b, 0x2b, 0x48, 0x3f, 0x22, 0x23, 0x91, 0x72, 0x5b, 0x3d, 0x49, 0x65,
+	0x3a, 0xcd, 0x5b, 0xca, 0x59, 0xc0, 0xc4, 0x0e, 0x9d, 0x4b, 0xe9, 0x96, 0x9c, 0x34, 0x29, 0xcb,
+	0x64, 0xcc, 0xa4, 0xdf, 0x58, 0x2d, 0xde, 0x67, 0x95, 0x03, 0x20, 0x5c, 0x45, 0x84, 0x79, 0x7a,
+	0x39, 0x0d, 0x21, 0xf4, 0xf8, 0x35, 0x6d, 0xd2, 0xee, 0x44, 0x45, 0x98, 0x0b, 0x1f, 0x3d, 0xbb,
+	0x1b, 0xa2, 0x75, 0x5f, 0xcf, 0xce, 0x74, 0x73, 0xb5, 0xa6, 0xe5, 0xbe, 0x8a, 0x62, 0x06, 0xe2,
+	0x6b, 0x8b, 0x8c, 0xdf, 0x06, 0x9d, 0xdc, 0xac, 0xe9, 0x85, 0x2e, 0x99, 0xdb, 0x6f, 0xdd, 0x59,
+	0xa7, 0x77, 0x40, 0x8b, 0xc0, 0x1b, 0x48, 0xe0, 0x35, 0xe7, 0x7a, 0x77, 0x02, 0xd1, 0xfd, 0x17,
+	0xf3, 0x3c, 0x28, 0xad, 0x23, 0x95, 0x72, 0x94, 0xe1, 0x96, 0xb5, 0x48, 0xeb, 0x48, 0xe9, 0x0e,
+	0xf8, 0x3b, 0xab, 0x55, 0x26, 0x75, 0x4f, 0xa9, 0x67, 0xdb, 0xcd, 0x49, 0x78, 0x8b, 0x84, 0x8b,
+	0x24, 0x16, 0xe8, 0x7c, 0x9a, 0x0a, 0x55, 0xf0, 0x77, 0xbc, 0x08, 0xe6, 0x7b, 0x8b, 0x0c, 0x47,
+	0xe7, 0x0b, 0x3d, 0xbf, 0x1b, 0xb1, 0xe3, 0xdc, 0x39, 0xc4, 0xc9, 0xf0, 0xbf, 0xa8, 0xaf, 0x9d,
+	0xae, 0x1f, 0xdd, 0x2d, 0x1c, 0xef, 0x66, 0x78, 0xfe, 0x60, 0x91, 0x4c, 0x93, 0x42, 0xf3, 0xdd,
+	0xa3, 0x23, 0xe9, 0xf4, 0x27, 0x49, 0x7f, 0xb1, 0xc8, 0x74, 0x84, 0xdf, 0x39, 0x21, 0x8e, 0x90,
+	0x66, 0xdc, 0xf5, 0x4e, 0xca, 0x8c, 0x88, 0xc9, 0xfe, 0x64, 0x91, 0xe1, 0xe8, 0x80, 0xde, 0xcb,
+	0xae, 0xe3, 0xe0, 0x3e, 0x44, 0x76, 0x4b, 0x51, 0x37, 0x66, 0x53, 0xbe, 0x49, 0xa4, 0xf2, 0x3c,
+	0xd9, 0xf5, 0x5f, 0x2d, 0x92, 0x69, 0xd2, 0xe9, 0x2d, 0xe7, 0xab, 0x22, 0xec, 0x1e, 0x8c, 0x30,
+	0xfd, 0xcd, 0x22, 0xd3, 0x11, 0x97, 0xbe, 0x1d, 0xf0, 0xaa, 0x28, 0xff, 0x1f, 0x29, 0xbb, 0xd9,
+	0xf9, 0x7e, 0xe7, 0x6c, 0x07, 0x71, 0x46, 0x86, 0x0b, 0xe0, 0x43, 0xef, 0x8b, 0x80, 0xbd, 0xdb,
+	0xdc, 0x1a, 0x31, 0xf3, 0xd1, 0x5d, 0x63, 0x31, 0xed, 0xae, 0x61, 0x76, 0xb2, 0x4a, 0x32, 0x11,
+	0x44, 0x9b, 0x2a, 0x07, 0x06, 0xbb, 0xb4, 0x0f, 0x30, 0xaa, 0xc8, 0x74, 0x84, 0xb4, 0x7b, 0x13,
+	0x0e, 0x0c, 0x17, 0x5f, 0x5a, 0x16, 0xf7, 0x71, 0x69, 0x79, 0x46, 0x4e, 0xbe, 0xcf, 0x7c, 0x6e,
+	0x36, 0x35, 0xfa, 0x13, 0x80, 0x9e, 0xdb, 0x73, 0x48, 0x24, 0x7f, 0x0e, 0xa4, 0x60, 0x2e, 0x23,
+	0xe6, 0x55, 0x27, 0xf5, 0xac, 0xac, 0xc7, 0x50, 0xf1, 0xf6, 0x7d, 0x6e, 0x91, 0xc9, 0x26, 0x3a,
+	0x16, 0xfd, 0x72, 0x14, 0x6e, 0x22, 0x85, 0x65, 0x67, 0xb1, 0x6f, 0xd9, 0xbb, 0x88, 0xac, 0xac,
+	0xfd, 0xfe, 0x62, 0xd6, 0xfa, 0xe3, 0xc5, 0xac, 0xf5, 0xf7, 0x8b, 0x59, 0xeb, 0x83, 0xd7, 0xf7,
+	0xf7, 0xbf, 0x9f, 0x87, 0xbf, 0xbf, 0x92, 0x3a, 0x1b, 0x9b, 0xc3, 0xf8, 0x17, 0xdd, 0x8d, 0xff,
+	0x06, 0x00, 0xff, 0x54, 0xba, 0x9b, 0x87, 0x14, 0x00, 0x00,
 }
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -732,10 +904,15 @@ type RepositoryServiceClient interface {
 	List(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*v1alpha1.RepositoryList, error)
 	// Get returns a repository or its credentials
 	Get(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*v1alpha1.Repository, error)
+	// GetWrite returns a repository or its write credentials
+	GetWrite(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*v1alpha1.Repository, error)
 	// ListRepositories gets a list of all configured repositories
 	ListRepositories(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*v1alpha1.RepositoryList, error)
+	// ListWriteRepositories gets a list of all configured write repositories
+	ListWriteRepositories(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*v1alpha1.RepositoryList, error)
 	ListRefs(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*apiclient.Refs, error)
-	// ListApps returns list of apps in the repe
+	ListOCITags(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*apiclient.Refs, error)
+	// ListApps returns list of apps in the repo
 	ListApps(ctx context.Context, in *RepoAppsQuery, opts ...grpc.CallOption) (*RepoAppsResponse, error)
 	// GetAppDetails returns application details by given path
 	GetAppDetails(ctx context.Context, in *RepoAppDetailsQuery, opts ...grpc.CallOption) (*apiclient.RepoAppDetailsResponse, error)
@@ -745,16 +922,24 @@ type RepositoryServiceClient interface {
 	Create(ctx context.Context, in *RepoCreateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error)
 	// CreateRepository creates a new repository configuration
 	CreateRepository(ctx context.Context, in *RepoCreateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error)
+	// CreateWriteRepository creates a new write repository configuration
+	CreateWriteRepository(ctx context.Context, in *RepoCreateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error)
 	// Update updates a repo or repo credential set
 	Update(ctx context.Context, in *RepoUpdateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error)
 	// UpdateRepository updates a repository configuration
 	UpdateRepository(ctx context.Context, in *RepoUpdateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error)
+	// UpdateWriteRepository updates a write repository configuration
+	UpdateWriteRepository(ctx context.Context, in *RepoUpdateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error)
 	// Delete deletes a repository from the configuration
 	Delete(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*RepoResponse, error)
 	// DeleteRepository deletes a repository from the configuration
 	DeleteRepository(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*RepoResponse, error)
+	// DeleteWriteRepository deletes a write repository from the configuration
+	DeleteWriteRepository(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*RepoResponse, error)
 	// ValidateAccess validates access to a repository with given parameters
 	ValidateAccess(ctx context.Context, in *RepoAccessQuery, opts ...grpc.CallOption) (*RepoResponse, error)
+	// ValidateWriteAccess validates write access to a repository with given parameters
+	ValidateWriteAccess(ctx context.Context, in *RepoAccessQuery, opts ...grpc.CallOption) (*RepoResponse, error)
 }
 
 type repositoryServiceClient struct {
@@ -784,6 +969,15 @@ func (c *repositoryServiceClient) Get(ctx context.Context, in *RepoQuery, opts .
 	return out, nil
 }
 
+func (c *repositoryServiceClient) GetWrite(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*v1alpha1.Repository, error) {
+	out := new(v1alpha1.Repository)
+	err := c.cc.Invoke(ctx, "/repository.RepositoryService/GetWrite", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *repositoryServiceClient) ListRepositories(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*v1alpha1.RepositoryList, error) {
 	out := new(v1alpha1.RepositoryList)
 	err := c.cc.Invoke(ctx, "/repository.RepositoryService/ListRepositories", in, out, opts...)
@@ -793,9 +987,27 @@ func (c *repositoryServiceClient) ListRepositories(ctx context.Context, in *Repo
 	return out, nil
 }
 
+func (c *repositoryServiceClient) ListWriteRepositories(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*v1alpha1.RepositoryList, error) {
+	out := new(v1alpha1.RepositoryList)
+	err := c.cc.Invoke(ctx, "/repository.RepositoryService/ListWriteRepositories", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *repositoryServiceClient) ListRefs(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*apiclient.Refs, error) {
 	out := new(apiclient.Refs)
 	err := c.cc.Invoke(ctx, "/repository.RepositoryService/ListRefs", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repositoryServiceClient) ListOCITags(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*apiclient.Refs, error) {
+	out := new(apiclient.Refs)
+	err := c.cc.Invoke(ctx, "/repository.RepositoryService/ListOCITags", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -848,6 +1060,15 @@ func (c *repositoryServiceClient) CreateRepository(ctx context.Context, in *Repo
 	return out, nil
 }
 
+func (c *repositoryServiceClient) CreateWriteRepository(ctx context.Context, in *RepoCreateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error) {
+	out := new(v1alpha1.Repository)
+	err := c.cc.Invoke(ctx, "/repository.RepositoryService/CreateWriteRepository", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Deprecated: Do not use.
 func (c *repositoryServiceClient) Update(ctx context.Context, in *RepoUpdateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error) {
 	out := new(v1alpha1.Repository)
@@ -861,6 +1082,15 @@ func (c *repositoryServiceClient) Update(ctx context.Context, in *RepoUpdateRequ
 func (c *repositoryServiceClient) UpdateRepository(ctx context.Context, in *RepoUpdateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error) {
 	out := new(v1alpha1.Repository)
 	err := c.cc.Invoke(ctx, "/repository.RepositoryService/UpdateRepository", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repositoryServiceClient) UpdateWriteRepository(ctx context.Context, in *RepoUpdateRequest, opts ...grpc.CallOption) (*v1alpha1.Repository, error) {
+	out := new(v1alpha1.Repository)
+	err := c.cc.Invoke(ctx, "/repository.RepositoryService/UpdateWriteRepository", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -886,9 +1116,27 @@ func (c *repositoryServiceClient) DeleteRepository(ctx context.Context, in *Repo
 	return out, nil
 }
 
+func (c *repositoryServiceClient) DeleteWriteRepository(ctx context.Context, in *RepoQuery, opts ...grpc.CallOption) (*RepoResponse, error) {
+	out := new(RepoResponse)
+	err := c.cc.Invoke(ctx, "/repository.RepositoryService/DeleteWriteRepository", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *repositoryServiceClient) ValidateAccess(ctx context.Context, in *RepoAccessQuery, opts ...grpc.CallOption) (*RepoResponse, error) {
 	out := new(RepoResponse)
 	err := c.cc.Invoke(ctx, "/repository.RepositoryService/ValidateAccess", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repositoryServiceClient) ValidateWriteAccess(ctx context.Context, in *RepoAccessQuery, opts ...grpc.CallOption) (*RepoResponse, error) {
+	out := new(RepoResponse)
+	err := c.cc.Invoke(ctx, "/repository.RepositoryService/ValidateWriteAccess", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -901,10 +1149,15 @@ type RepositoryServiceServer interface {
 	List(context.Context, *RepoQuery) (*v1alpha1.RepositoryList, error)
 	// Get returns a repository or its credentials
 	Get(context.Context, *RepoQuery) (*v1alpha1.Repository, error)
+	// GetWrite returns a repository or its write credentials
+	GetWrite(context.Context, *RepoQuery) (*v1alpha1.Repository, error)
 	// ListRepositories gets a list of all configured repositories
 	ListRepositories(context.Context, *RepoQuery) (*v1alpha1.RepositoryList, error)
+	// ListWriteRepositories gets a list of all configured write repositories
+	ListWriteRepositories(context.Context, *RepoQuery) (*v1alpha1.RepositoryList, error)
 	ListRefs(context.Context, *RepoQuery) (*apiclient.Refs, error)
-	// ListApps returns list of apps in the repe
+	ListOCITags(context.Context, *RepoQuery) (*apiclient.Refs, error)
+	// ListApps returns list of apps in the repo
 	ListApps(context.Context, *RepoAppsQuery) (*RepoAppsResponse, error)
 	// GetAppDetails returns application details by given path
 	GetAppDetails(context.Context, *RepoAppDetailsQuery) (*apiclient.RepoAppDetailsResponse, error)
@@ -914,16 +1167,24 @@ type RepositoryServiceServer interface {
 	Create(context.Context, *RepoCreateRequest) (*v1alpha1.Repository, error)
 	// CreateRepository creates a new repository configuration
 	CreateRepository(context.Context, *RepoCreateRequest) (*v1alpha1.Repository, error)
+	// CreateWriteRepository creates a new write repository configuration
+	CreateWriteRepository(context.Context, *RepoCreateRequest) (*v1alpha1.Repository, error)
 	// Update updates a repo or repo credential set
 	Update(context.Context, *RepoUpdateRequest) (*v1alpha1.Repository, error)
 	// UpdateRepository updates a repository configuration
 	UpdateRepository(context.Context, *RepoUpdateRequest) (*v1alpha1.Repository, error)
+	// UpdateWriteRepository updates a write repository configuration
+	UpdateWriteRepository(context.Context, *RepoUpdateRequest) (*v1alpha1.Repository, error)
 	// Delete deletes a repository from the configuration
 	Delete(context.Context, *RepoQuery) (*RepoResponse, error)
 	// DeleteRepository deletes a repository from the configuration
 	DeleteRepository(context.Context, *RepoQuery) (*RepoResponse, error)
+	// DeleteWriteRepository deletes a write repository from the configuration
+	DeleteWriteRepository(context.Context, *RepoQuery) (*RepoResponse, error)
 	// ValidateAccess validates access to a repository with given parameters
 	ValidateAccess(context.Context, *RepoAccessQuery) (*RepoResponse, error)
+	// ValidateWriteAccess validates write access to a repository with given parameters
+	ValidateWriteAccess(context.Context, *RepoAccessQuery) (*RepoResponse, error)
 }
 
 // UnimplementedRepositoryServiceServer can be embedded to have forward compatible implementations.
@@ -936,11 +1197,20 @@ func (*UnimplementedRepositoryServiceServer) List(ctx context.Context, req *Repo
 func (*UnimplementedRepositoryServiceServer) Get(ctx context.Context, req *RepoQuery) (*v1alpha1.Repository, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Get not implemented")
 }
+func (*UnimplementedRepositoryServiceServer) GetWrite(ctx context.Context, req *RepoQuery) (*v1alpha1.Repository, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetWrite not implemented")
+}
 func (*UnimplementedRepositoryServiceServer) ListRepositories(ctx context.Context, req *RepoQuery) (*v1alpha1.RepositoryList, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListRepositories not implemented")
 }
+func (*UnimplementedRepositoryServiceServer) ListWriteRepositories(ctx context.Context, req *RepoQuery) (*v1alpha1.RepositoryList, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListWriteRepositories not implemented")
+}
 func (*UnimplementedRepositoryServiceServer) ListRefs(ctx context.Context, req *RepoQuery) (*apiclient.Refs, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListRefs not implemented")
+}
+func (*UnimplementedRepositoryServiceServer) ListOCITags(ctx context.Context, req *RepoQuery) (*apiclient.Refs, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListOCITags not implemented")
 }
 func (*UnimplementedRepositoryServiceServer) ListApps(ctx context.Context, req *RepoAppsQuery) (*RepoAppsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListApps not implemented")
@@ -957,11 +1227,17 @@ func (*UnimplementedRepositoryServiceServer) Create(ctx context.Context, req *Re
 func (*UnimplementedRepositoryServiceServer) CreateRepository(ctx context.Context, req *RepoCreateRequest) (*v1alpha1.Repository, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateRepository not implemented")
 }
+func (*UnimplementedRepositoryServiceServer) CreateWriteRepository(ctx context.Context, req *RepoCreateRequest) (*v1alpha1.Repository, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateWriteRepository not implemented")
+}
 func (*UnimplementedRepositoryServiceServer) Update(ctx context.Context, req *RepoUpdateRequest) (*v1alpha1.Repository, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Update not implemented")
 }
 func (*UnimplementedRepositoryServiceServer) UpdateRepository(ctx context.Context, req *RepoUpdateRequest) (*v1alpha1.Repository, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UpdateRepository not implemented")
+}
+func (*UnimplementedRepositoryServiceServer) UpdateWriteRepository(ctx context.Context, req *RepoUpdateRequest) (*v1alpha1.Repository, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateWriteRepository not implemented")
 }
 func (*UnimplementedRepositoryServiceServer) Delete(ctx context.Context, req *RepoQuery) (*RepoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Delete not implemented")
@@ -969,8 +1245,14 @@ func (*UnimplementedRepositoryServiceServer) Delete(ctx context.Context, req *Re
 func (*UnimplementedRepositoryServiceServer) DeleteRepository(ctx context.Context, req *RepoQuery) (*RepoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteRepository not implemented")
 }
+func (*UnimplementedRepositoryServiceServer) DeleteWriteRepository(ctx context.Context, req *RepoQuery) (*RepoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteWriteRepository not implemented")
+}
 func (*UnimplementedRepositoryServiceServer) ValidateAccess(ctx context.Context, req *RepoAccessQuery) (*RepoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ValidateAccess not implemented")
+}
+func (*UnimplementedRepositoryServiceServer) ValidateWriteAccess(ctx context.Context, req *RepoAccessQuery) (*RepoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ValidateWriteAccess not implemented")
 }
 
 func RegisterRepositoryServiceServer(s *grpc.Server, srv RepositoryServiceServer) {
@@ -1013,6 +1295,24 @@ func _RepositoryService_Get_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepositoryService_GetWrite_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepoQuery)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryServiceServer).GetWrite(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/repository.RepositoryService/GetWrite",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryServiceServer).GetWrite(ctx, req.(*RepoQuery))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RepositoryService_ListRepositories_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RepoQuery)
 	if err := dec(in); err != nil {
@@ -1031,6 +1331,24 @@ func _RepositoryService_ListRepositories_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepositoryService_ListWriteRepositories_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepoQuery)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryServiceServer).ListWriteRepositories(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/repository.RepositoryService/ListWriteRepositories",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryServiceServer).ListWriteRepositories(ctx, req.(*RepoQuery))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RepositoryService_ListRefs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RepoQuery)
 	if err := dec(in); err != nil {
@@ -1045,6 +1363,24 @@ func _RepositoryService_ListRefs_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RepositoryServiceServer).ListRefs(ctx, req.(*RepoQuery))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RepositoryService_ListOCITags_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepoQuery)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryServiceServer).ListOCITags(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/repository.RepositoryService/ListOCITags",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryServiceServer).ListOCITags(ctx, req.(*RepoQuery))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1139,6 +1475,24 @@ func _RepositoryService_CreateRepository_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepositoryService_CreateWriteRepository_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepoCreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryServiceServer).CreateWriteRepository(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/repository.RepositoryService/CreateWriteRepository",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryServiceServer).CreateWriteRepository(ctx, req.(*RepoCreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RepositoryService_Update_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RepoUpdateRequest)
 	if err := dec(in); err != nil {
@@ -1171,6 +1525,24 @@ func _RepositoryService_UpdateRepository_Handler(srv interface{}, ctx context.Co
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RepositoryServiceServer).UpdateRepository(ctx, req.(*RepoUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RepositoryService_UpdateWriteRepository_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepoUpdateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryServiceServer).UpdateWriteRepository(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/repository.RepositoryService/UpdateWriteRepository",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryServiceServer).UpdateWriteRepository(ctx, req.(*RepoUpdateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1211,6 +1583,24 @@ func _RepositoryService_DeleteRepository_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepositoryService_DeleteWriteRepository_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepoQuery)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryServiceServer).DeleteWriteRepository(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/repository.RepositoryService/DeleteWriteRepository",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryServiceServer).DeleteWriteRepository(ctx, req.(*RepoQuery))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RepositoryService_ValidateAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RepoAccessQuery)
 	if err := dec(in); err != nil {
@@ -1229,6 +1619,24 @@ func _RepositoryService_ValidateAccess_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepositoryService_ValidateWriteAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepoAccessQuery)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryServiceServer).ValidateWriteAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/repository.RepositoryService/ValidateWriteAccess",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryServiceServer).ValidateWriteAccess(ctx, req.(*RepoAccessQuery))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var _RepositoryService_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "repository.RepositoryService",
 	HandlerType: (*RepositoryServiceServer)(nil),
@@ -1242,12 +1650,24 @@ var _RepositoryService_serviceDesc = grpc.ServiceDesc{
 			Handler:    _RepositoryService_Get_Handler,
 		},
 		{
+			MethodName: "GetWrite",
+			Handler:    _RepositoryService_GetWrite_Handler,
+		},
+		{
 			MethodName: "ListRepositories",
 			Handler:    _RepositoryService_ListRepositories_Handler,
 		},
 		{
+			MethodName: "ListWriteRepositories",
+			Handler:    _RepositoryService_ListWriteRepositories_Handler,
+		},
+		{
 			MethodName: "ListRefs",
 			Handler:    _RepositoryService_ListRefs_Handler,
+		},
+		{
+			MethodName: "ListOCITags",
+			Handler:    _RepositoryService_ListOCITags_Handler,
 		},
 		{
 			MethodName: "ListApps",
@@ -1270,12 +1690,20 @@ var _RepositoryService_serviceDesc = grpc.ServiceDesc{
 			Handler:    _RepositoryService_CreateRepository_Handler,
 		},
 		{
+			MethodName: "CreateWriteRepository",
+			Handler:    _RepositoryService_CreateWriteRepository_Handler,
+		},
+		{
 			MethodName: "Update",
 			Handler:    _RepositoryService_Update_Handler,
 		},
 		{
 			MethodName: "UpdateRepository",
 			Handler:    _RepositoryService_UpdateRepository_Handler,
+		},
+		{
+			MethodName: "UpdateWriteRepository",
+			Handler:    _RepositoryService_UpdateWriteRepository_Handler,
 		},
 		{
 			MethodName: "Delete",
@@ -1286,8 +1714,16 @@ var _RepositoryService_serviceDesc = grpc.ServiceDesc{
 			Handler:    _RepositoryService_DeleteRepository_Handler,
 		},
 		{
+			MethodName: "DeleteWriteRepository",
+			Handler:    _RepositoryService_DeleteWriteRepository_Handler,
+		},
+		{
 			MethodName: "ValidateAccess",
 			Handler:    _RepositoryService_ValidateAccess_Handler,
+		},
+		{
+			MethodName: "ValidateWriteAccess",
+			Handler:    _RepositoryService_ValidateWriteAccess_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -1317,6 +1753,20 @@ func (m *RepoAppsQuery) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	if m.XXX_unrecognized != nil {
 		i -= len(m.XXX_unrecognized)
 		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.AppProject) > 0 {
+		i -= len(m.AppProject)
+		copy(dAtA[i:], m.AppProject)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.AppProject)))
+		i--
+		dAtA[i] = 0x22
+	}
+	if len(m.AppName) > 0 {
+		i -= len(m.AppName)
+		copy(dAtA[i:], m.AppName)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.AppName)))
+		i--
+		dAtA[i] = 0x1a
 	}
 	if len(m.Revision) > 0 {
 		i -= len(m.Revision)
@@ -1399,6 +1849,23 @@ func (m *RepoAppDetailsQuery) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	if m.XXX_unrecognized != nil {
 		i -= len(m.XXX_unrecognized)
 		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if m.VersionId != 0 {
+		i = encodeVarintRepository(dAtA, i, uint64(m.VersionId))
+		i--
+		dAtA[i] = 0x28
+	}
+	if m.SourceIndex != 0 {
+		i = encodeVarintRepository(dAtA, i, uint64(m.SourceIndex))
+		i--
+		dAtA[i] = 0x20
+	}
+	if len(m.AppProject) > 0 {
+		i -= len(m.AppProject)
+		copy(dAtA[i:], m.AppProject)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.AppProject)))
+		i--
+		dAtA[i] = 0x1a
 	}
 	if len(m.AppName) > 0 {
 		i -= len(m.AppName)
@@ -1487,6 +1954,13 @@ func (m *RepoQuery) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 		i -= len(m.XXX_unrecognized)
 		copy(dAtA[i:], m.XXX_unrecognized)
 	}
+	if len(m.AppProject) > 0 {
+		i -= len(m.AppProject)
+		copy(dAtA[i:], m.AppProject)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.AppProject)))
+		i--
+		dAtA[i] = 0x1a
+	}
 	if m.ForceRefresh {
 		i--
 		if m.ForceRefresh {
@@ -1530,6 +2004,114 @@ func (m *RepoAccessQuery) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	if m.XXX_unrecognized != nil {
 		i -= len(m.XXX_unrecognized)
 		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.AzureActiveDirectoryEndpoint) > 0 {
+		i -= len(m.AzureActiveDirectoryEndpoint)
+		copy(dAtA[i:], m.AzureActiveDirectoryEndpoint)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.AzureActiveDirectoryEndpoint)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0xd2
+	}
+	if len(m.AzureServicePrincipalTenantId) > 0 {
+		i -= len(m.AzureServicePrincipalTenantId)
+		copy(dAtA[i:], m.AzureServicePrincipalTenantId)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.AzureServicePrincipalTenantId)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0xca
+	}
+	if len(m.AzureServicePrincipalClientSecret) > 0 {
+		i -= len(m.AzureServicePrincipalClientSecret)
+		copy(dAtA[i:], m.AzureServicePrincipalClientSecret)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.AzureServicePrincipalClientSecret)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0xc2
+	}
+	if len(m.AzureServicePrincipalClientId) > 0 {
+		i -= len(m.AzureServicePrincipalClientId)
+		copy(dAtA[i:], m.AzureServicePrincipalClientId)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.AzureServicePrincipalClientId)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0xba
+	}
+	if m.InsecureOciForceHttp {
+		i--
+		if m.InsecureOciForceHttp {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0xb0
+	}
+	if len(m.BearerToken) > 0 {
+		i -= len(m.BearerToken)
+		copy(dAtA[i:], m.BearerToken)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.BearerToken)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0xaa
+	}
+	if m.UseAzureWorkloadIdentity {
+		i--
+		if m.UseAzureWorkloadIdentity {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0xa0
+	}
+	if m.ForceHttpBasicAuth {
+		i--
+		if m.ForceHttpBasicAuth {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x98
+	}
+	if len(m.GcpServiceAccountKey) > 0 {
+		i -= len(m.GcpServiceAccountKey)
+		copy(dAtA[i:], m.GcpServiceAccountKey)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.GcpServiceAccountKey)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x92
+	}
+	if len(m.Project) > 0 {
+		i -= len(m.Project)
+		copy(dAtA[i:], m.Project)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.Project)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x8a
+	}
+	if len(m.Proxy) > 0 {
+		i -= len(m.Proxy)
+		copy(dAtA[i:], m.Proxy)
+		i = encodeVarintRepository(dAtA, i, uint64(len(m.Proxy)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x82
 	}
 	if len(m.GithubAppEnterpriseBaseUrl) > 0 {
 		i -= len(m.GithubAppEnterpriseBaseUrl)
@@ -1784,6 +2366,14 @@ func (m *RepoAppsQuery) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovRepository(uint64(l))
 	}
+	l = len(m.AppName)
+	if l > 0 {
+		n += 1 + l + sovRepository(uint64(l))
+	}
+	l = len(m.AppProject)
+	if l > 0 {
+		n += 1 + l + sovRepository(uint64(l))
+	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
 	}
@@ -1824,6 +2414,16 @@ func (m *RepoAppDetailsQuery) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovRepository(uint64(l))
 	}
+	l = len(m.AppProject)
+	if l > 0 {
+		n += 1 + l + sovRepository(uint64(l))
+	}
+	if m.SourceIndex != 0 {
+		n += 1 + sovRepository(uint64(m.SourceIndex))
+	}
+	if m.VersionId != 0 {
+		n += 1 + sovRepository(uint64(m.VersionId))
+	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
 	}
@@ -1860,6 +2460,10 @@ func (m *RepoQuery) Size() (n int) {
 	}
 	if m.ForceRefresh {
 		n += 2
+	}
+	l = len(m.AppProject)
+	if l > 0 {
+		n += 1 + l + sovRepository(uint64(l))
 	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
@@ -1924,6 +2528,47 @@ func (m *RepoAccessQuery) Size() (n int) {
 	l = len(m.GithubAppEnterpriseBaseUrl)
 	if l > 0 {
 		n += 1 + l + sovRepository(uint64(l))
+	}
+	l = len(m.Proxy)
+	if l > 0 {
+		n += 2 + l + sovRepository(uint64(l))
+	}
+	l = len(m.Project)
+	if l > 0 {
+		n += 2 + l + sovRepository(uint64(l))
+	}
+	l = len(m.GcpServiceAccountKey)
+	if l > 0 {
+		n += 2 + l + sovRepository(uint64(l))
+	}
+	if m.ForceHttpBasicAuth {
+		n += 3
+	}
+	if m.UseAzureWorkloadIdentity {
+		n += 3
+	}
+	l = len(m.BearerToken)
+	if l > 0 {
+		n += 2 + l + sovRepository(uint64(l))
+	}
+	if m.InsecureOciForceHttp {
+		n += 3
+	}
+	l = len(m.AzureServicePrincipalClientId)
+	if l > 0 {
+		n += 2 + l + sovRepository(uint64(l))
+	}
+	l = len(m.AzureServicePrincipalClientSecret)
+	if l > 0 {
+		n += 2 + l + sovRepository(uint64(l))
+	}
+	l = len(m.AzureServicePrincipalTenantId)
+	if l > 0 {
+		n += 2 + l + sovRepository(uint64(l))
+	}
+	l = len(m.AzureActiveDirectoryEndpoint)
+	if l > 0 {
+		n += 2 + l + sovRepository(uint64(l))
 	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
@@ -2080,16 +2725,77 @@ func (m *RepoAppsQuery) Unmarshal(dAtA []byte) error {
 			}
 			m.Revision = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AppName", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AppName = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AppProject", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AppProject = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipRepository(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {
@@ -2204,10 +2910,7 @@ func (m *AppInfo) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {
@@ -2320,16 +3023,83 @@ func (m *RepoAppDetailsQuery) Unmarshal(dAtA []byte) error {
 			}
 			m.AppName = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AppProject", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AppProject = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SourceIndex", wireType)
+			}
+			m.SourceIndex = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.SourceIndex |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field VersionId", wireType)
+			}
+			m.VersionId = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.VersionId |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := skipRepository(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {
@@ -2414,10 +3184,7 @@ func (m *RepoAppsResponse) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {
@@ -2514,16 +3281,45 @@ func (m *RepoQuery) Unmarshal(dAtA []byte) error {
 				}
 			}
 			m.ForceRefresh = bool(v != 0)
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AppProject", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AppProject = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipRepository(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {
@@ -2966,16 +3762,329 @@ func (m *RepoAccessQuery) Unmarshal(dAtA []byte) error {
 			}
 			m.GithubAppEnterpriseBaseUrl = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
+		case 16:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Proxy", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Proxy = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 17:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Project", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Project = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 18:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field GcpServiceAccountKey", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.GcpServiceAccountKey = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 19:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ForceHttpBasicAuth", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.ForceHttpBasicAuth = bool(v != 0)
+		case 20:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field UseAzureWorkloadIdentity", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.UseAzureWorkloadIdentity = bool(v != 0)
+		case 21:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field BearerToken", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.BearerToken = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 22:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field InsecureOciForceHttp", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.InsecureOciForceHttp = bool(v != 0)
+		case 23:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AzureServicePrincipalClientId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AzureServicePrincipalClientId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 24:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AzureServicePrincipalClientSecret", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AzureServicePrincipalClientSecret = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 25:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AzureServicePrincipalTenantId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AzureServicePrincipalTenantId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 26:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AzureActiveDirectoryEndpoint", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRepository
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthRepository
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthRepository
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AzureActiveDirectoryEndpoint = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipRepository(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {
@@ -3026,10 +4135,7 @@ func (m *RepoResponse) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {
@@ -3156,10 +4262,7 @@ func (m *RepoCreateRequest) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {
@@ -3246,10 +4349,7 @@ func (m *RepoUpdateRequest) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
-				return ErrInvalidLengthRepository
-			}
-			if (iNdEx + skippy) < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthRepository
 			}
 			if (iNdEx + skippy) > l {

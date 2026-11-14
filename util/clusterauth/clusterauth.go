@@ -6,14 +6,16 @@ import (
 	"strings"
 	"time"
 
-	jwt "github.com/dgrijalva/jwt-go/v4"
+	"github.com/golang-jwt/jwt/v5"
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	apierr "k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/argoproj/argo-cd/v3/common"
 )
 
 // ArgoCDManagerServiceAccount is the name of the service account for managing a cluster
@@ -21,6 +23,7 @@ const (
 	ArgoCDManagerServiceAccount     = "argocd-manager"
 	ArgoCDManagerClusterRole        = "argocd-manager-role"
 	ArgoCDManagerClusterRoleBinding = "argocd-manager-role-binding"
+	SATokenSecretSuffix             = "-long-lived-token"
 )
 
 // ArgoCDManagerPolicyRules are the policies to give argocd-manager
@@ -52,19 +55,15 @@ func CreateServiceAccount(
 	namespace string,
 ) error {
 	serviceAccount := corev1.ServiceAccount{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "ServiceAccount",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceAccountName,
-			Namespace: namespace,
-		},
+		APIVersion: "v1",
+		Kind:       "ServiceAccount",
+		Name:       serviceAccountName,
+		Namespace:  namespace,
 	}
 	_, err := clientset.CoreV1().ServiceAccounts(namespace).Create(context.Background(), &serviceAccount, metav1.CreateOptions{})
 	if err != nil {
-		if !apierr.IsAlreadyExists(err) {
-			return fmt.Errorf("Failed to create service account %q in namespace %q: %v", serviceAccountName, namespace, err)
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create service account %q in namespace %q: %w", serviceAccountName, namespace, err)
 		}
 		log.Infof("ServiceAccount %q already exists in namespace %q", serviceAccountName, namespace)
 		return nil
@@ -73,15 +72,15 @@ func CreateServiceAccount(
 	return nil
 }
 
-func upsert(kind string, name string, create func() (interface{}, error), update func() (interface{}, error)) error {
+func upsert(kind string, name string, create func() (any, error), update func() (any, error)) error {
 	_, err := create()
 	if err != nil {
-		if !apierr.IsAlreadyExists(err) {
-			return fmt.Errorf("Failed to create %s %q: %v", kind, name, err)
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create %s %q: %w", kind, name, err)
 		}
 		_, err = update()
 		if err != nil {
-			return fmt.Errorf("Failed to update %s %q: %v", kind, name, err)
+			return fmt.Errorf("failed to update %s %q: %w", kind, name, err)
 		}
 		log.Infof("%s %q updated", kind, name)
 	} else {
@@ -92,49 +91,37 @@ func upsert(kind string, name string, create func() (interface{}, error), update
 
 func upsertClusterRole(clientset kubernetes.Interface, name string, rules []rbacv1.PolicyRule) error {
 	clusterRole := rbacv1.ClusterRole{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRole",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Rules: rules,
+		APIVersion: "rbac.authorization.k8s.io/v1",
+		Kind:       "ClusterRole",
+		Name:       name,
+		Rules:      rules,
 	}
-	return upsert("ClusterRole", name, func() (interface{}, error) {
+	return upsert("ClusterRole", name, func() (any, error) {
 		return clientset.RbacV1().ClusterRoles().Create(context.Background(), &clusterRole, metav1.CreateOptions{})
-	}, func() (interface{}, error) {
+	}, func() (any, error) {
 		return clientset.RbacV1().ClusterRoles().Update(context.Background(), &clusterRole, metav1.UpdateOptions{})
 	})
 }
 
 func upsertRole(clientset kubernetes.Interface, name string, namespace string, rules []rbacv1.PolicyRule) error {
 	role := rbacv1.Role{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "Role",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Rules: rules,
+		APIVersion: "rbac.authorization.k8s.io/v1",
+		Kind:       "Role",
+		Name:       name,
+		Rules:      rules,
 	}
-	return upsert("Role", fmt.Sprintf("%s/%s", namespace, name), func() (interface{}, error) {
+	return upsert("Role", fmt.Sprintf("%s/%s", namespace, name), func() (any, error) {
 		return clientset.RbacV1().Roles(namespace).Create(context.Background(), &role, metav1.CreateOptions{})
-	}, func() (interface{}, error) {
+	}, func() (any, error) {
 		return clientset.RbacV1().Roles(namespace).Update(context.Background(), &role, metav1.UpdateOptions{})
 	})
 }
 
 func upsertClusterRoleBinding(clientset kubernetes.Interface, name string, clusterRoleName string, subject rbacv1.Subject) error {
 	roleBinding := rbacv1.ClusterRoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRoleBinding",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
+		APIVersion: "rbac.authorization.k8s.io/v1",
+		Kind:       "ClusterRoleBinding",
+		Name:       name,
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "ClusterRole",
@@ -142,22 +129,18 @@ func upsertClusterRoleBinding(clientset kubernetes.Interface, name string, clust
 		},
 		Subjects: []rbacv1.Subject{subject},
 	}
-	return upsert("ClusterRoleBinding", name, func() (interface{}, error) {
+	return upsert("ClusterRoleBinding", name, func() (any, error) {
 		return clientset.RbacV1().ClusterRoleBindings().Create(context.Background(), &roleBinding, metav1.CreateOptions{})
-	}, func() (interface{}, error) {
+	}, func() (any, error) {
 		return clientset.RbacV1().ClusterRoleBindings().Update(context.Background(), &roleBinding, metav1.UpdateOptions{})
 	})
 }
 
 func upsertRoleBinding(clientset kubernetes.Interface, name string, roleName string, namespace string, subject rbacv1.Subject) error {
 	roleBinding := rbacv1.RoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "RoleBinding",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
+		APIVersion: "rbac.authorization.k8s.io/v1",
+		Kind:       "RoleBinding",
+		Name:       name,
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "Role",
@@ -165,16 +148,15 @@ func upsertRoleBinding(clientset kubernetes.Interface, name string, roleName str
 		},
 		Subjects: []rbacv1.Subject{subject},
 	}
-	return upsert("RoleBinding", fmt.Sprintf("%s/%s", namespace, name), func() (interface{}, error) {
+	return upsert("RoleBinding", fmt.Sprintf("%s/%s", namespace, name), func() (any, error) {
 		return clientset.RbacV1().RoleBindings(namespace).Create(context.Background(), &roleBinding, metav1.CreateOptions{})
-	}, func() (interface{}, error) {
+	}, func() (any, error) {
 		return clientset.RbacV1().RoleBindings(namespace).Update(context.Background(), &roleBinding, metav1.UpdateOptions{})
 	})
 }
 
 // InstallClusterManagerRBAC installs RBAC resources for a cluster manager to operate a cluster. Returns a token
-func InstallClusterManagerRBAC(clientset kubernetes.Interface, ns string, namespaces []string) (string, error) {
-
+func InstallClusterManagerRBAC(clientset kubernetes.Interface, ns string, namespaces []string, bearerTokenTimeout time.Duration) (string, error) {
 	err := CreateServiceAccount(clientset, ArgoCDManagerServiceAccount, ns)
 	if err != nil {
 		return "", err
@@ -212,42 +194,71 @@ func InstallClusterManagerRBAC(clientset kubernetes.Interface, ns string, namesp
 		}
 	}
 
-	return GetServiceAccountBearerToken(clientset, ns, ArgoCDManagerServiceAccount)
+	return GetServiceAccountBearerToken(clientset, ns, ArgoCDManagerServiceAccount, bearerTokenTimeout)
 }
 
-// GetServiceAccountBearerToken will attempt to get the provided service account until it
-// exists, iterate the secrets associated with it looking for one of type
-// kubernetes.io/service-account-token, and return it's token if found.
-func GetServiceAccountBearerToken(clientset kubernetes.Interface, ns string, sa string) (string, error) {
-	var serviceAccount *corev1.ServiceAccount
+// GetServiceAccountBearerToken determines if a ServiceAccount has a
+// bearer token secret to use or if a secret should be created. It then
+// waits for the secret to have a bearer token if a secret needs to
+// be created and returns the token in encoded base64.
+func GetServiceAccountBearerToken(clientset kubernetes.Interface, ns string, sa string, timeout time.Duration) (string, error) {
+	secretName, err := getOrCreateServiceAccountTokenSecret(clientset, sa, ns)
+	if err != nil {
+		return "", err
+	}
+
 	var secret *corev1.Secret
-	var err error
-	err = wait.Poll(500*time.Millisecond, 30*time.Second, func() (bool, error) {
-		serviceAccount, err = clientset.CoreV1().ServiceAccounts(ns).Get(context.Background(), sa, metav1.GetOptions{})
+	err = wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		ctx, cancel := context.WithTimeout(ctx, common.ClusterAuthRequestTimeout)
+		defer cancel()
+		secret, err = clientset.CoreV1().Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("failed to get secret %q for serviceaccount %q: %w", secretName, sa, err)
 		}
-		// Scan all secrets looking for one of the correct type:
-		for _, oRef := range serviceAccount.Secrets {
-			var getErr error
-			secret, err = clientset.CoreV1().Secrets(ns).Get(context.Background(), oRef.Name, metav1.GetOptions{})
-			if err != nil {
-				return false, fmt.Errorf("Failed to retrieve secret %q: %v", oRef.Name, getErr)
-			}
-			if secret.Type == corev1.SecretTypeServiceAccountToken {
-				return true, nil
-			}
+
+		_, ok := secret.Data[corev1.ServiceAccountTokenKey]
+		if !ok {
+			return false, nil
 		}
-		return false, nil
+
+		return true, nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("Failed to wait for service account secret: %v", err)
+		return "", fmt.Errorf("failed to get token for serviceaccount %q: %w", sa, err)
 	}
-	token, ok := secret.Data["token"]
-	if !ok {
-		return "", fmt.Errorf("Secret %q for service account %q did not have a token", secret.Name, serviceAccount)
+
+	return string(secret.Data[corev1.ServiceAccountTokenKey]), nil
+}
+
+// getOrCreateServiceAccountTokenSecret will create a
+// kubernetes.io/service-account-token secret associated with a
+// ServiceAccount named '<service account name>-long-lived-token', or
+// use the existing one with that name.
+// This was added to help add k8s v1.24+ clusters.
+func getOrCreateServiceAccountTokenSecret(clientset kubernetes.Interface, serviceaccount, namespace string) (string, error) {
+	secret := &corev1.Secret{
+		Name:      serviceaccount + SATokenSecretSuffix,
+		Namespace: namespace,
+		Annotations: map[string]string{
+			corev1.ServiceAccountNameKey: serviceaccount,
+		},
+		Type: corev1.SecretTypeServiceAccountToken,
 	}
-	return string(token), nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), common.ClusterAuthRequestTimeout)
+	defer cancel()
+	_, err := clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+
+	switch {
+	case apierrors.IsAlreadyExists(err):
+		log.Infof("Using existing bearer token secret %q for ServiceAccount %q", secret.Name, serviceaccount)
+	case err != nil:
+		return "", fmt.Errorf("failed to create secret %q for serviceaccount %q: %w", secret.Name, serviceaccount, err)
+	default:
+		log.Infof("Created bearer token secret %q for ServiceAccount %q", secret.Name, serviceaccount)
+	}
+
+	return secret.Name, nil
 }
 
 // UninstallClusterManagerRBAC removes RBAC resources for a cluster manager to operate a cluster
@@ -258,8 +269,8 @@ func UninstallClusterManagerRBAC(clientset kubernetes.Interface) error {
 // UninstallRBAC uninstalls RBAC related resources  for a binding, role, and service account
 func UninstallRBAC(clientset kubernetes.Interface, namespace, bindingName, roleName, serviceAccount string) error {
 	if err := clientset.RbacV1().ClusterRoleBindings().Delete(context.Background(), bindingName, metav1.DeleteOptions{}); err != nil {
-		if !apierr.IsNotFound(err) {
-			return fmt.Errorf("Failed to delete ClusterRoleBinding: %v", err)
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete ClusterRoleBinding: %w", err)
 		}
 		log.Infof("ClusterRoleBinding %q not found", bindingName)
 	} else {
@@ -267,8 +278,8 @@ func UninstallRBAC(clientset kubernetes.Interface, namespace, bindingName, roleN
 	}
 
 	if err := clientset.RbacV1().ClusterRoles().Delete(context.Background(), roleName, metav1.DeleteOptions{}); err != nil {
-		if !apierr.IsNotFound(err) {
-			return fmt.Errorf("Failed to delete ClusterRole: %v", err)
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete ClusterRole: %w", err)
 		}
 		log.Infof("ClusterRole %q not found", roleName)
 	} else {
@@ -276,8 +287,8 @@ func UninstallRBAC(clientset kubernetes.Interface, namespace, bindingName, roleN
 	}
 
 	if err := clientset.CoreV1().ServiceAccounts(namespace).Delete(context.Background(), serviceAccount, metav1.DeleteOptions{}); err != nil {
-		if !apierr.IsNotFound(err) {
-			return fmt.Errorf("Failed to delete ServiceAccount: %v", err)
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete ServiceAccount: %w", err)
 		}
 		log.Infof("ServiceAccount %q in namespace %q not found", serviceAccount, namespace)
 	} else {
@@ -287,28 +298,20 @@ func UninstallRBAC(clientset kubernetes.Interface, namespace, bindingName, roleN
 }
 
 type ServiceAccountClaims struct {
-	Sub                string `json:"sub"`
-	Iss                string `json:"iss"`
 	Namespace          string `json:"kubernetes.io/serviceaccount/namespace"`
 	SecretName         string `json:"kubernetes.io/serviceaccount/secret.name"`
 	ServiceAccountName string `json:"kubernetes.io/serviceaccount/service-account.name"`
 	ServiceAccountUID  string `json:"kubernetes.io/serviceaccount/service-account.uid"`
-}
-
-// Valid satisfies the jwt.Claims interface to enable JWT parsing
-func (sac *ServiceAccountClaims) Valid(helper *jwt.ValidationHelper) error {
-	return nil
+	jwt.RegisteredClaims
 }
 
 // ParseServiceAccountToken parses a Kubernetes service account token
 func ParseServiceAccountToken(token string) (*ServiceAccountClaims, error) {
-	parser := &jwt.Parser{
-		ValidationHelper: jwt.NewValidationHelper(jwt.WithoutClaimsValidation(), jwt.WithoutAudienceValidation()),
-	}
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
 	var claims ServiceAccountClaims
 	_, _, err := parser.ParseUnverified(token, &claims)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse service account token: %s", err)
+		return nil, fmt.Errorf("failed to parse service account token: %w", err)
 	}
 	return &claims, nil
 }
@@ -337,8 +340,8 @@ func GenerateNewClusterManagerSecret(clientset kubernetes.Interface, claims *Ser
 		return nil, err
 	}
 
-	err = wait.Poll(500*time.Millisecond, 30*time.Second, func() (bool, error) {
-		created, err = secretsClient.Get(context.Background(), created.Name, metav1.GetOptions{})
+	err = wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, 30*time.Second, false, func(ctx context.Context) (bool, error) {
+		created, err = secretsClient.Get(ctx, created.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -348,7 +351,7 @@ func GenerateNewClusterManagerSecret(clientset kubernetes.Interface, claims *Ser
 		return true, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("Timed out waiting for secret to generate new token")
+		return nil, fmt.Errorf("timed out waiting for secret to generate new token: %w", err)
 	}
 	return created, nil
 }
@@ -383,7 +386,7 @@ func RotateServiceAccountSecrets(clientset kubernetes.Interface, claims *Service
 	// 2. delete existing secret object
 	secretsClient := clientset.CoreV1().Secrets(claims.Namespace)
 	err = secretsClient.Delete(context.Background(), claims.SecretName, metav1.DeleteOptions{})
-	if !apierr.IsNotFound(err) {
+	if !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil

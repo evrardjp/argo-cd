@@ -1,133 +1,227 @@
 package dex
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"strconv"
 
-	"github.com/ghodss/yaml"
+	"sigs.k8s.io/yaml"
 
-	"github.com/argoproj/argo-cd/v2/common"
-	"github.com/argoproj/argo-cd/v2/util/settings"
+	"github.com/argoproj/argo-cd/v3/common"
+	"github.com/argoproj/argo-cd/v3/util/settings"
+
+	log "github.com/sirupsen/logrus"
 )
 
-func GenerateDexConfigYAML(settings *settings.ArgoCDSettings) ([]byte, error) {
-	if !settings.IsDexConfigured() {
+// deviceCodeGrantType is the URN for the OAuth 2.0 Device Authorization Grant (RFC 8628).
+const deviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+
+func GenerateDexConfigYAML(argocdSettings *settings.ArgoCDSettings, disableTLS bool) ([]byte, error) {
+	if !argocdSettings.IsDexConfigured() {
 		return nil, nil
 	}
-	redirectURL, err := settings.RedirectURL()
+	redirectURL, err := argocdSettings.RedirectURL()
 	if err != nil {
-		return nil, fmt.Errorf("failed to infer redirect url from config: %v", err)
+		return nil, fmt.Errorf("failed to infer redirect url from config: %w", err)
 	}
-	var dexCfg map[string]interface{}
-	err = yaml.Unmarshal([]byte(settings.DexConfig), &dexCfg)
+	var dexCfg map[string]any
+	err = yaml.Unmarshal([]byte(argocdSettings.DexConfig), &dexCfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal dex.config from configmap: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal dex.config from configmap: %w", err)
 	}
-	dexCfg["issuer"] = settings.IssuerURL()
-	dexCfg["storage"] = map[string]interface{}{
-		"type": "memory",
+	dexCfg["issuer"] = argocdSettings.IssuerURL()
+	storage := map[string]any{}
+	if existingStorage, found := dexCfg["storage"].(map[string]any); found {
+		if storageType, ok := existingStorage["type"].(string); ok && storageType != "" {
+			storage["type"] = storageType
+			if storageConfig, ok := existingStorage["config"].(map[string]any); ok {
+				storage["config"] = storageConfig
+			}
+		} else {
+			// No type specified, default to memory and ignore any config
+			storage["type"] = "memory"
+		}
+	} else {
+		storage["type"] = "memory"
 	}
-	dexCfg["web"] = map[string]interface{}{
-		"http": "0.0.0.0:5556",
-	}
-	dexCfg["grpc"] = map[string]interface{}{
-		"addr": "0.0.0.0:5557",
-	}
-	dexCfg["telemetry"] = map[string]interface{}{
-		"http": "0.0.0.0:5558",
-	}
-	dexCfg["oauth2"] = map[string]interface{}{
-		"skipApprovalScreen": true,
+	dexCfg["storage"] = storage
+	if disableTLS {
+		dexCfg["web"] = map[string]any{
+			"http": "0.0.0.0:5556",
+		}
+	} else {
+		webCfg := map[string]any{
+			"https":   "0.0.0.0:5556",
+			"tlsCert": "/tmp/tls.crt",
+			"tlsKey":  "/tmp/tls.key",
+		}
+		if existingWeb, found := dexCfg["web"].(map[string]any); found {
+			if minVersion, ok := existingWeb["tlsMinVersion"]; ok && minVersion != "" {
+				webCfg["tlsMinVersion"] = minVersion
+			}
+			if ciphers, exists := existingWeb["tlsCiphers"]; exists {
+				if ciphersList, ok := ciphers.([]any); ok {
+					if len(ciphersList) > 0 {
+						webCfg["tlsCiphers"] = ciphersList
+					}
+				} else {
+					log.Warnf("Invalid 'tlsCiphers' value, expected a list, using default ciphers")
+				}
+			}
+
+			if curvePreferences, exists := existingWeb["tlsCurvePreferences"]; exists {
+				if curvePreferencesList, ok := curvePreferences.([]any); ok {
+					if len(curvePreferencesList) > 0 {
+						webCfg["tlsCurvePreferences"] = curvePreferencesList
+					}
+				} else {
+					log.Warnf("Invalid 'tlsCurvePreferences' value, expected a list, using default curve preferences")
+				}
+			}
+		}
+		dexCfg["web"] = webCfg
 	}
 
-	argoCDStaticClient := map[string]interface{}{
-		"id":     common.ArgoCDClientAppID,
-		"name":   common.ArgoCDClientAppName,
-		"secret": settings.DexOAuth2ClientSecret(),
-		"redirectURIs": []string{
-			redirectURL,
-		},
+	if loggerCfg, found := dexCfg["logger"].(map[string]any); found {
+		if _, found := loggerCfg["level"]; !found {
+			loggerCfg["level"] = slogLevelFromLogrus(os.Getenv(common.EnvLogLevel))
+		}
+		if _, found := loggerCfg["format"]; !found {
+			loggerCfg["format"] = os.Getenv(common.EnvLogFormat)
+		}
+	} else {
+		dexCfg["logger"] = map[string]any{
+			"level":  slogLevelFromLogrus(os.Getenv(common.EnvLogLevel)),
+			"format": os.Getenv(common.EnvLogFormat),
+		}
 	}
-	argoCDCLIStaticClient := map[string]interface{}{
+
+	dexCfg["grpc"] = map[string]any{
+		"addr": "0.0.0.0:5557",
+	}
+	dexCfg["telemetry"] = map[string]any{
+		"http": "0.0.0.0:5558",
+	}
+
+	if oauth2Cfg, found := dexCfg["oauth2"].(map[string]any); found {
+		if _, found := oauth2Cfg["skipApprovalScreen"].(bool); !found {
+			oauth2Cfg["skipApprovalScreen"] = true
+		}
+		// If the operator has explicitly set oauth2.grantTypes but omitted
+		// device_code, respect that restriction — do not silently override it.
+		// Emit a warning so the operator knows the CLI device authorization flow
+		// will not work until they add the grant type themselves.
+		if existing, found := oauth2Cfg["grantTypes"].([]any); found {
+			hasDeviceCode := false
+			for _, g := range existing {
+				if g == deviceCodeGrantType {
+					hasDeviceCode = true
+					break
+				}
+			}
+			if !hasDeviceCode {
+				log.Warnf("oauth2.grantTypes is explicitly configured but does not include %q. "+
+					"The Argo CD CLI device authorization flow will not work. "+
+					"Add %q to oauth2.grantTypes in your Dex configuration to enable it.",
+					deviceCodeGrantType, deviceCodeGrantType)
+			}
+		}
+	} else {
+		dexCfg["oauth2"] = map[string]any{
+			"skipApprovalScreen": true,
+		}
+	}
+
+	additionalRedirectURLs, err := argocdSettings.RedirectAdditionalURLs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to infer additional redirect urls from config: %w", err)
+	}
+	argoCDStaticClient := map[string]any{
+		"id":           common.ArgoCDClientAppID,
+		"name":         common.ArgoCDClientAppName,
+		"secret":       argocdSettings.DexOAuth2ClientSecret(),
+		"redirectURIs": append([]string{redirectURL}, additionalRedirectURLs...),
+	}
+	argoCDPKCEStaticClient := map[string]any{
+		"id":   "argo-cd-pkce",
+		"name": "Argo CD PKCE",
+		"redirectURIs": []string{
+			"http://localhost:4000/auth/callback",
+		},
+		"public": true,
+	}
+	// Device code flow: after the user authenticates via the connector (e.g.
+	// GitHub), Dex redirects back to its own device callback endpoint. Because
+	// Argo CD proxies Dex under /api/dex, the path seen by Dex—and sent as
+	// redirect_uri to the upstream IdP—is /api/dex/device/callback.
+	argoCDCLIStaticClient := map[string]any{
 		"id":     common.ArgoCDCLIClientAppID,
 		"name":   common.ArgoCDCLIClientAppName,
 		"public": true,
 		"redirectURIs": []string{
 			"http://localhost",
 			"http://localhost:8085/auth/callback",
+			common.DexDeviceCallbackEndpoint,
 		},
 	}
 
-	staticClients, ok := dexCfg["staticClients"].([]interface{})
+	staticClients, ok := dexCfg["staticClients"].([]any)
 	if ok {
-		dexCfg["staticClients"] = append([]interface{}{argoCDStaticClient, argoCDCLIStaticClient}, staticClients...)
+		dexCfg["staticClients"] = append([]any{argoCDStaticClient, argoCDCLIStaticClient, argoCDPKCEStaticClient}, staticClients...)
 	} else {
-		dexCfg["staticClients"] = []interface{}{argoCDStaticClient, argoCDCLIStaticClient}
+		dexCfg["staticClients"] = []any{argoCDStaticClient, argoCDCLIStaticClient, argoCDPKCEStaticClient}
 	}
 
-	dexRedirectURL, err := settings.DexRedirectURL()
+	dexRedirectURL, err := argocdSettings.DexRedirectURL()
 	if err != nil {
 		return nil, err
 	}
-	connectors, ok := dexCfg["connectors"].([]interface{})
+	connectors, ok := dexCfg["connectors"].([]any)
 	if !ok {
-		return nil, fmt.Errorf("malformed Dex configuration found")
+		return nil, errors.New("malformed Dex configuration found")
 	}
 	for i, connectorIf := range connectors {
-		connector, ok := connectorIf.(map[string]interface{})
+		connector, ok := connectorIf.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("malformed Dex configuration found")
+			return nil, errors.New("malformed Dex configuration found")
 		}
 		connectorType := connector["type"].(string)
 		if !needsRedirectURI(connectorType) {
 			continue
 		}
-		connectorCfg, ok := connector["config"].(map[string]interface{})
+		connectorCfg, ok := connector["config"].(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("malformed Dex configuration found")
+			return nil, errors.New("malformed Dex configuration found")
 		}
 		connectorCfg["redirectURI"] = dexRedirectURL
 		connector["config"] = connectorCfg
 		connectors[i] = connector
 	}
 	dexCfg["connectors"] = connectors
-	dexCfg = replaceMapSecrets(dexCfg, settings.Secrets)
+	dexCfg = settings.ReplaceMapSecrets(dexCfg, argocdSettings.Secrets)
+
+	shouldEscape := true
+	if dexExpandEnv, err := strconv.ParseBool(os.Getenv("DEX_EXPAND_ENV")); err == nil {
+		shouldEscape = dexExpandEnv
+	}
+
+	if shouldEscape {
+		if escapedConnectors, ok := dexCfg["connectors"].([]any); ok {
+			for i, connectorIf := range escapedConnectors {
+				connector, ok := connectorIf.(map[string]any)
+				if !ok {
+					continue
+				}
+				if connectorCfg, ok := connector["config"].(map[string]any); ok {
+					connector["config"] = settings.EscapeDollarSignsInConnectorConfig(connectorCfg, argocdSettings.Secrets)
+					escapedConnectors[i] = connector
+				}
+			}
+			dexCfg["connectors"] = escapedConnectors
+		}
+	}
 	return yaml.Marshal(dexCfg)
-}
-
-// replaceMapSecrets takes a json object and recursively looks for any secret key references in the
-// object and replaces the value with the secret value
-func replaceMapSecrets(obj map[string]interface{}, secretValues map[string]string) map[string]interface{} {
-	newObj := make(map[string]interface{})
-	for k, v := range obj {
-		switch val := v.(type) {
-		case map[string]interface{}:
-			newObj[k] = replaceMapSecrets(val, secretValues)
-		case []interface{}:
-			newObj[k] = replaceListSecrets(val, secretValues)
-		case string:
-			newObj[k] = settings.ReplaceStringSecret(val, secretValues)
-		default:
-			newObj[k] = val
-		}
-	}
-	return newObj
-}
-
-func replaceListSecrets(obj []interface{}, secretValues map[string]string) []interface{} {
-	newObj := make([]interface{}, len(obj))
-	for i, v := range obj {
-		switch val := v.(type) {
-		case map[string]interface{}:
-			newObj[i] = replaceMapSecrets(val, secretValues)
-		case []interface{}:
-			newObj[i] = replaceListSecrets(val, secretValues)
-		case string:
-			newObj[i] = settings.ReplaceStringSecret(val, secretValues)
-		default:
-			newObj[i] = val
-		}
-	}
-	return newObj
 }
 
 // needsRedirectURI returns whether or not the given connector type needs a redirectURI
@@ -135,8 +229,28 @@ func replaceListSecrets(obj []interface{}, secretValues map[string]string) []int
 // https://dexidp.io/docs/connectors/
 func needsRedirectURI(connectorType string) bool {
 	switch connectorType {
-	case "oidc", "saml", "microsoft", "linkedin", "gitlab", "github", "bitbucket-cloud", "openshift":
+	case "oidc", "saml", "microsoft", "linkedin", "gitlab", "github", "bitbucket-cloud", "openshift", "gitea", "google", "oauth":
 		return true
 	}
 	return false
+}
+
+func slogLevelFromLogrus(level string) string {
+	logrusLevel, err := log.ParseLevel(level)
+	if err != nil {
+		return level
+	}
+
+	switch logrusLevel {
+	case log.DebugLevel, log.TraceLevel:
+		return "DEBUG"
+	case log.InfoLevel:
+		return "INFO"
+	case log.WarnLevel:
+		return "WARN"
+	case log.ErrorLevel, log.FatalLevel, log.PanicLevel:
+		return "ERROR"
+	}
+	// return the logrus level and let slog parse it
+	return level
 }

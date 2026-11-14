@@ -1,238 +1,544 @@
-import {Checkbox, DataLoader, Tooltip} from 'argo-ui';
-import * as classNames from 'classnames';
+import {useData, Checkbox} from 'argo-ui/v2';
+import {minimatch} from 'minimatch';
 import * as React from 'react';
+import {
+    Application,
+    ApplicationSet,
+    Cluster,
+    HealthStatusCode,
+    HealthStatuses,
+    OperationStateTitle,
+    OperationStateTitles,
+    SyncStatusCode,
+    SyncStatuses
+} from '../../../shared/models';
+import {AppsListPreferences, AppSetsListPreferences, services} from '../../../shared/services';
+import {Filter, FiltersGroup} from '../filter/filter';
+import {createMetadataSelector} from '../selectors';
+import {ComparisonStatusIcon, getAppAllSources, getAppSetHealthStatus, HealthStatusIcon, getOperationStateTitle, isFavorite} from '../utils';
+import {formatClusterQueryParam} from '../../../shared/utils';
+import {COLORS} from '../../../shared/components/colors';
+import {AppsListFacets, collectMetadataValues, DestinationCluster, getAutoSyncStatus, getHydrationStatus, MetadataValues, StatusCounts} from './applications-list-stats';
 
-import {TagsInput} from '../../../shared/components';
-import * as models from '../../../shared/models';
-import {AppsListPreferences, services} from '../../../shared/services';
+export {getAutoSyncStatus, getHydrationStatus};
 
-export interface ApplicationsFilterProps {
-    clusters: models.Cluster[];
-    applications: models.Application[];
-    pref: AppsListPreferences;
-    onChange: (pref: AppsListPreferences) => any;
+export interface FilterResult {
+    sync: boolean;
+    autosync: boolean;
+    health: boolean;
+    hydration: boolean;
+    clusters: boolean;
+    namespaces: boolean;
+    repos: boolean;
+    targetRevision: boolean;
+    operation: boolean;
+    annotations: boolean;
+    favourite: boolean;
+    labels: boolean;
 }
 
-const maxFilterItemsCount = 10;
-
-class ItemsFilter extends React.Component<
-    {
-        items: {name: string; count: number}[];
-        type: string;
-        selected: string[];
-        onChange: (selected: string[]) => any;
-    },
-    {
-        expanded: boolean;
-    }
-> {
-    constructor(props: any) {
-        super(props);
-        this.state = {expanded: false};
-    }
-
-    public render() {
-        const unavailableSelected = this.props.selected.filter(selected => !this.props.items.some(item => item.name === selected));
-        const items = this.props.items.sort((first, second) => (first.name > second.name ? 1 : -1)).concat(unavailableSelected.map(selected => ({name: selected, count: 0})));
-        return (
-            <React.Fragment>
-                <ul className={classNames('applications-list__filter', {'applications-list__filter--expanded': this.state.expanded})}>
-                    {items.map(item => (
-                        <li key={item.name}>
-                            <div className='applications-list__filter-label'>
-                                <Checkbox
-                                    checked={this.props.selected.indexOf(item.name) > -1}
-                                    id={`filter-${this.props.type}-${item.name}`}
-                                    onChange={() => {
-                                        const newSelected = this.props.selected.slice();
-                                        const index = newSelected.indexOf(item.name);
-                                        if (index > -1) {
-                                            newSelected.splice(index, 1);
-                                        } else {
-                                            newSelected.push(item.name);
-                                        }
-                                        this.props.onChange(newSelected);
-                                    }}
-                                />{' '}
-                                <label title={item.name} htmlFor={`filter-${this.props.type}-${item.name}`}>
-                                    {item.name}
-                                </label>
-                            </div>{' '}
-                            <span>{item.count}</span>
-                        </li>
-                    ))}
-                </ul>
-                {items.length > maxFilterItemsCount && <a onClick={() => this.setState({expanded: !this.state.expanded})}>{this.state.expanded ? 'collapse' : 'expand'}</a>}
-            </React.Fragment>
-        );
-    }
+export interface ApplicationSetFilterResult {
+    health: boolean;
+    favourite: boolean;
+    labels: boolean;
 }
 
-function getLabelsSuggestions(labels: Map<string, Set<string>>) {
-    const suggestions = new Array<string>();
-    Array.from(labels.entries()).forEach(([label, values]) => {
-        suggestions.push(label);
-        values.forEach(val => suggestions.push(`${label}=${val}`));
+export interface FilteredApp extends Application {
+    isAppOfAppsPattern?: boolean;
+    filterResult: FilterResult;
+}
+
+export interface ApplicationSetFilteredApp extends ApplicationSet {
+    filterResult: ApplicationSetFilterResult;
+}
+
+// Deleting and Terminated states are grouped under the "Syncing" filter option in the UI
+// (see combinedSyncingCount in getOperationOptions). Normalize them so the filter matches
+// the count shown in the badge.
+function getOperationStateTitleForFilter(app: Application): OperationStateTitle {
+    const title = getOperationStateTitle(app);
+    if (title === OperationStateTitles.Deleting || title === OperationStateTitles.Terminated) {
+        return OperationStateTitles.Syncing;
+    }
+    return title;
+}
+
+export function getAppFilterResults(applications: Application[], pref: AppsListPreferences, hydratorEnabled: boolean): FilteredApp[] {
+    const labelSelector = createMetadataSelector(pref.labelsFilter || []);
+    const annotationSelector = createMetadataSelector(pref.annotationsFilter || []);
+    const hydrationFilter = pref.hydrationFilter || [];
+
+    return applications.map(app => {
+        const targetRevisions = getAppAllSources(app)
+            .map(source => source.targetRevision)
+            .filter((item): item is string => !!item);
+
+        return {
+            ...app,
+            filterResult: {
+                sync: pref.syncFilter.length === 0 || pref.syncFilter.includes(app.status.sync.status),
+                autosync: pref.autoSyncFilter.length === 0 || pref.autoSyncFilter.includes(getAutoSyncStatus(app.spec.syncPolicy)),
+                health: pref.healthFilter.length === 0 || pref.healthFilter.includes(app.status.health.status),
+                hydration: !hydratorEnabled || hydrationFilter.length === 0 || hydrationFilter.includes(getHydrationStatus(app)),
+                namespaces: pref.namespacesFilter.length === 0 || pref.namespacesFilter.some(ns => app.spec.destination.namespace && minimatch(app.spec.destination.namespace, ns)),
+                favourite: !pref.showFavorites || isFavorite(pref.favoritesAppList, app),
+                clusters:
+                    pref.clustersFilter.length === 0 ||
+                    pref.clustersFilter.some(filterString => {
+                        const match = filterString.match('^(.*) [(](http.*)[)]$');
+                        if (match?.length === 3) {
+                            const [, name, url] = match;
+                            return url === app.spec.destination.server || name === app.spec.destination.name;
+                        } else {
+                            const inputMatch = filterString.match('^http.*$');
+                            return (
+                                (inputMatch && inputMatch[0] === app.spec.destination.server) || (app.spec.destination.name && minimatch(app.spec.destination.name, filterString))
+                            );
+                        }
+                    }),
+                repos:
+                    pref.reposFilter.length === 0 || pref.reposFilter.some(repoURL => getAppAllSources(app).some(source => source.repoURL && minimatch(source.repoURL, repoURL))),
+                targetRevision:
+                    pref.targetRevisionFilter.length === 0 || pref.targetRevisionFilter.some(filter => targetRevisions.some(targetRevision => minimatch(targetRevision, filter))),
+                labels: pref.labelsFilter.length === 0 || labelSelector(app.metadata.labels),
+                annotations: pref.annotationsFilter.length === 0 || annotationSelector(app.metadata.annotations),
+                operation: pref.operationFilter.length === 0 || pref.operationFilter.includes(getOperationStateTitleForFilter(app))
+            }
+        };
     });
-    return suggestions;
 }
 
-export class ApplicationsFilter extends React.Component<ApplicationsFilterProps, {expanded: boolean}> {
-    constructor(props: ApplicationsFilterProps) {
-        super(props);
-        this.state = {expanded: false};
+export function getAppSetFilterResults(appSets: ApplicationSet[], pref: AppSetsListPreferences): ApplicationSetFilteredApp[] {
+    const labelSelector = createMetadataSelector(pref.labelsFilter || []);
+
+    return appSets.map(appSet => ({
+        ...appSet,
+        filterResult: {
+            health: pref.healthFilter.length === 0 || pref.healthFilter.includes(getAppSetHealthStatus(appSet)),
+            favourite: !pref.showFavorites || isFavorite(pref.favoritesAppList, appSet),
+            labels: pref.labelsFilter.length === 0 || labelSelector(appSet.metadata.labels)
+        }
+    }));
+}
+
+const optionsFrom = (options: string[], filter: string[]) => {
+    return options
+        .filter(s => filter.indexOf(s) === -1)
+        .map(item => {
+            return {label: item};
+        });
+};
+
+// Props for Application filters
+export interface AppFilterProps {
+    facets: AppsListFacets;
+    pref: AppsListPreferences;
+    onChange: (newPref: AppsListPreferences) => void;
+    collapsed?: boolean;
+    hydratorEnabled?: boolean;
+    children?: React.ReactNode;
+}
+
+// Props for ApplicationSet filters
+export interface AppSetFilterProps {
+    apps: ApplicationSetFilteredApp[];
+    pref: AppSetsListPreferences;
+    onChange: (newPrefs: AppSetsListPreferences) => void;
+    children?: React.ReactNode;
+    collapsed?: boolean;
+}
+
+const getAppSetCounts = (apps: ApplicationSetFilteredApp[], filterType: keyof ApplicationSetFilterResult, filter: (app: ApplicationSet) => string, init?: string[]) => {
+    const map = new Map<string, number>();
+    if (init) {
+        init.forEach(key => map.set(key, 0));
     }
+    // filter out all apps that does not match other filters and ignore this filter result
+    apps.filter(app => filter(app) && Object.keys(app.filterResult).every((key: keyof ApplicationSetFilterResult) => key === filterType || app.filterResult[key])).forEach(app =>
+        map.set(filter(app), (map.get(filter(app)) || 0) + 1)
+    );
+    return map;
+};
 
-    public render() {
-        const {applications, pref, onChange} = this.props;
+const getOptions = (counts: StatusCounts, keys: string[], getIcon?: (k: string) => React.ReactNode) => {
+    return keys.map(k => {
+        return {
+            label: k,
+            icon: getIcon && getIcon(k),
+            count: counts[k] || 0
+        };
+    });
+};
 
-        const sync = new Map<string, number>();
-        Object.keys(models.SyncStatuses).forEach(key => sync.set(models.SyncStatuses[key], 0));
-        applications.filter(app => app.status.sync.status).forEach(app => sync.set(app.status.sync.status, (sync.get(app.status.sync.status) || 0) + 1));
-        const health = new Map<string, number>();
-        Object.keys(models.HealthStatuses).forEach(key => health.set(models.HealthStatuses[key], 0));
-        applications.filter(app => app.status.health.status).forEach(app => health.set(app.status.health.status, (health.get(app.status.health.status) || 0) + 1));
-        const labels = new Map<string, Set<string>>();
-        applications
-            .filter(app => app.metadata && app.metadata.labels)
-            .forEach(app =>
-                Object.keys(app.metadata.labels).forEach(label => {
-                    let values = labels.get(label);
-                    if (!values) {
-                        values = new Set<string>();
-                        labels.set(label, values);
-                    }
-                    values.add(app.metadata.labels[label]);
-                })
-            );
+const getAppSetOptions = (
+    apps: ApplicationSetFilteredApp[],
+    filterType: keyof ApplicationSetFilterResult,
+    filter: (app: ApplicationSet) => string,
+    keys: string[],
+    getIcon?: (k: string) => React.ReactNode
+) => {
+    const counts = getAppSetCounts(apps, filterType, filter, keys);
+    return keys.map(k => {
+        return {
+            label: k,
+            icon: getIcon && getIcon(k),
+            count: counts.get(k)
+        };
+    });
+};
 
-        const filtersCount = AppsListPreferences.countEnabledFilters(pref);
+const SyncFilter = (props: AppFilterProps) => (
+    <Filter
+        label='SYNC STATUS'
+        selected={props.pref.syncFilter}
+        setSelected={s => props.onChange({...props.pref, syncFilter: s})}
+        options={getOptions(props.facets.totalBySyncStatus, Object.keys(SyncStatuses), s => (
+            <ComparisonStatusIcon status={s as SyncStatusCode} noSpin={true} />
+        ))}
+    />
+);
 
-        return (
-            <div
-                className={classNames('applications-list__filters-container', {'applications-list__filters-container--expanded': this.state.expanded})}
-                onClick={() => {
-                    if (window.innerWidth < 1440) {
-                        this.setState({expanded: !this.state.expanded});
-                    }
-                }}>
-                <div className={classNames('applications-list__filters-title', {'applications-list__filters-title--expanded': this.state.expanded})}>
-                    <Tooltip content='Filters'>
-                        <i className='fa fa-filter' />
-                    </Tooltip>
-                    <div style={{marginLeft: 'auto'}} />
-                    <div className='applications-list__filters-title__counter tags-input__tag' style={filtersCount === 0 ? {display: 'none'} : {}}>
-                        {filtersCount} Filter{filtersCount === 1 ? '' : 's'}
-                        <Tooltip content='Clear Filters'>
-                            <i
-                                className='fa fa-times'
-                                onClick={() => {
-                                    AppsListPreferences.clearFilters(this.props.pref);
-                                    this.props.onChange(this.props.pref);
-                                }}
-                            />
-                        </Tooltip>
-                    </div>
-                    <Tooltip content={(this.state.expanded ? 'Collapse' : 'Expand') + ' Filters'}>
-                        <i
-                            className={classNames('fa applications-list__filters-title__expander', {'fa-chevron-up': this.state.expanded, 'fa-chevron-down': !this.state.expanded})}
-                            onClick={() => this.setState({expanded: !this.state.expanded})}
-                        />
-                    </Tooltip>
-                </div>
-                <div className='applications-list__filters-container-contents row'>
-                    <div className='columns small-12 medium-3 xxlarge-12'>
-                        <div className='applications-list__filter-title'>Sync</div>
-                        <ItemsFilter
-                            selected={pref.syncFilter}
-                            onChange={selected => onChange({...pref, syncFilter: selected})}
-                            items={Array.from(sync.keys()).map(status => ({name: status, count: sync.get(status) || 0}))}
-                            type='sync'
-                        />
-                    </div>
-                    <div className='columns small-12 medium-3 xxlarge-12'>
-                        <div className='applications-list__filter-title'>Health</div>
-                        <ItemsFilter
-                            selected={pref.healthFilter}
-                            onChange={selected => onChange({...pref, healthFilter: selected})}
-                            items={Array.from(health.keys()).map(status => ({name: status, count: health.get(status) || 0}))}
-                            type='health'
-                        />
-                    </div>
-                    <div className='columns small-12 medium-6 xxlarge-12'>
-                        <div className='applications-list__filter'>
-                            <div className='applications-list__filter-title'>Labels</div>
-                            <ul>
-                                <li>
-                                    <TagsInput
-                                        placeholder=''
-                                        autocomplete={getLabelsSuggestions(labels)}
-                                        tags={pref.labelsFilter}
-                                        onChange={selected => onChange({...pref, labelsFilter: selected})}
-                                    />
-                                </li>
-                            </ul>
-                            <div className='applications-list__filter-title'>Projects</div>
-                            <ul>
-                                <li>
-                                    <DataLoader load={() => services.projects.list('items.metadata.name')}>
-                                        {projects => {
-                                            const projAppCount = new Map<string, number>();
-                                            projects.forEach(proj => projAppCount.set(proj.metadata.name, 0));
-                                            applications.forEach(app => projAppCount.set(app.spec.project, (projAppCount.get(app.spec.project) || 0) + 1));
-                                            return (
-                                                <TagsInput
-                                                    placeholder='default'
-                                                    autocomplete={projects.map(proj => proj.metadata.name)}
-                                                    tags={pref.projectsFilter}
-                                                    onChange={selected => onChange({...pref, projectsFilter: selected})}
-                                                />
-                                            );
-                                        }}
-                                    </DataLoader>
-                                </li>
-                            </ul>
-                            <div className='applications-list__filter-title'>Clusters</div>
-                            <ul>
-                                <li>
-                                    <TagsInput
-                                        placeholder='in-cluster (https://kubernetes.default.svc)'
-                                        autocomplete={Array.from(new Set(applications.map(app => this.getClusterDetail(app.spec.destination)).filter(item => !!item))).filter(
-                                            ns => pref.clustersFilter.indexOf(ns) === -1
-                                        )}
-                                        tags={pref.clustersFilter}
-                                        onChange={selected => onChange({...pref, clustersFilter: selected})}
-                                    />
-                                </li>
-                            </ul>
-                            <div className='applications-list__filter-title'>Namespaces</div>
-                            <ul>
-                                <li>
-                                    <TagsInput
-                                        placeholder='*-us-west-*'
-                                        autocomplete={Array.from(new Set(applications.map(app => app.spec.destination.namespace).filter(item => !!item))).filter(
-                                            ns => pref.namespacesFilter.indexOf(ns) === -1
-                                        )}
-                                        tags={pref.namespacesFilter}
-                                        onChange={selected => onChange({...pref, namespacesFilter: selected})}
-                                    />
-                                </li>
-                            </ul>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        );
-    }
+const AppHealthFilter = (props: AppFilterProps) => (
+    <Filter
+        label='HEALTH STATUS'
+        selected={props.pref.healthFilter}
+        setSelected={s => props.onChange({...props.pref, healthFilter: s})}
+        options={getOptions(props.facets.totalByHealthStatus, Object.keys(HealthStatuses), s => (
+            <HealthStatusIcon state={{status: s as HealthStatusCode, message: ''}} noSpin={true} />
+        ))}
+    />
+);
 
-    private getClusterDetail(dest: models.ApplicationDestination): string {
-        const cluster = this.props.clusters.find(target => target.name === dest.name || target.server === dest.server);
+const AppSetHealthFilter = (props: AppSetFilterProps) => (
+    <Filter
+        label='HEALTH STATUS'
+        selected={props.pref.healthFilter}
+        setSelected={s => props.onChange({...props.pref, healthFilter: s})}
+        options={getAppSetOptions(
+            props.apps,
+            'health',
+            app => getAppSetHealthStatus(app),
+            ['Healthy', 'Progressing', 'Degraded', 'Unknown'],
+            s => (
+                <HealthStatusIcon state={{status: s as HealthStatusCode, message: ''}} noSpin={true} />
+            )
+        )}
+    />
+);
+
+function getHydrationOptions(counts: StatusCounts) {
+    const hydrationStatuses = ['None', 'Hydrating', 'Hydrated', 'Failed'];
+    return hydrationStatuses.map(status => {
+        let icon;
+        const iconColor =
+            status === 'Hydrated'
+                ? COLORS.operation.success
+                : status === 'Failed'
+                  ? COLORS.operation.failed
+                  : status === 'Hydrating'
+                    ? COLORS.operation.running
+                    : COLORS.sync.unknown;
+
+        switch (status) {
+            case 'Hydrated':
+                icon = <i className='fa fa-check-circle' style={{color: iconColor}} />;
+                break;
+            case 'Failed':
+                icon = <i className='fa fa-times-circle' style={{color: iconColor}} />;
+                break;
+            case 'Hydrating':
+                icon = <i className='fa fa-circle-notch' style={{color: iconColor}} />;
+                break;
+            case 'None':
+                icon = <i className='fa fa-minus-circle' style={{color: iconColor}} />;
+                break;
+            default:
+                icon = <i className='fa fa-question-circle' style={{color: iconColor}} />;
+                break;
+        }
+
+        return {
+            label: status,
+            icon,
+            count: counts[status] || 0
+        };
+    });
+}
+
+const HydrationFilter = (props: AppFilterProps) => (
+    <Filter
+        label='HYDRATION STATUS'
+        selected={props.pref.hydrationFilter}
+        setSelected={s => props.onChange({...props.pref, hydrationFilter: s})}
+        options={getHydrationOptions(props.facets.totalByHydrationStatus)}
+    />
+);
+
+function metadataOptions(values: MetadataValues[]) {
+    const suggestions: string[] = [];
+    values.forEach(({key, values: keyValues}) => {
+        suggestions.push(key);
+        keyValues.forEach(val => suggestions.push(`${key}=${val}`));
+    });
+    return suggestions.map(s => ({label: s}));
+}
+
+const MetadataFilter = React.memo((props: {label: string; values: MetadataValues[]; selected: string[]; onChange: (selected: string[]) => void}) => {
+    const options = React.useMemo(() => metadataOptions(props.values), [props.values]);
+    return <Filter label={props.label} selected={props.selected} setSelected={s => props.onChange(s)} field={true} options={options} />;
+});
+
+const ProjectFilter = (props: AppFilterProps) => {
+    const [projects, loading, error] = useData(
+        () => services.projects.list('items.metadata.name'),
+        null,
+        () => null
+    );
+    const projectOptions = (projects || []).map(proj => {
+        return {label: proj.metadata.name};
+    });
+    return (
+        <Filter
+            label='PROJECTS'
+            selected={props.pref.projectsFilter}
+            setSelected={s => props.onChange({...props.pref, projectsFilter: s})}
+            field={true}
+            options={projectOptions}
+            error={error.state}
+            retry={error.retry}
+            loading={loading}
+        />
+    );
+};
+
+const ClusterFilter = React.memo((props: AppFilterProps) => {
+    const getClusterDetail = (dest: DestinationCluster, clusterList: Cluster[]): string => {
+        const cluster = (clusterList || []).find(target => target.name === dest.name || target.server === dest.server);
         if (!cluster) {
             return dest.server || dest.name;
         }
-        if (cluster.name === cluster.server) {
-            return cluster.name;
+        return formatClusterQueryParam(cluster);
+    };
+
+    const [clusters, loading, error] = useData(() => services.clusters.list());
+    const clusterOptions = React.useMemo(
+        () => optionsFrom(Array.from(new Set(props.facets.destinations.map(dest => getClusterDetail(dest, clusters)).filter(item => !!item))), props.pref.clustersFilter),
+        [props.facets.destinations, clusters, props.pref.clustersFilter]
+    );
+
+    return (
+        <Filter
+            label='CLUSTERS'
+            selected={props.pref.clustersFilter}
+            setSelected={s => props.onChange({...props.pref, clustersFilter: s})}
+            field={true}
+            options={clusterOptions}
+            error={error.state}
+            retry={error.retry}
+            loading={loading}
+        />
+    );
+});
+
+const NamespaceFilter = React.memo((props: AppFilterProps) => {
+    const namespaceOptions = React.useMemo(() => optionsFrom(props.facets.namespaces, props.pref.namespacesFilter), [props.facets.namespaces, props.pref.namespacesFilter]);
+    return (
+        <Filter
+            label='NAMESPACES'
+            selected={props.pref.namespacesFilter}
+            setSelected={s => props.onChange({...props.pref, namespacesFilter: s})}
+            field={true}
+            options={namespaceOptions}
+        />
+    );
+});
+
+const TargetRevisionFilter = (props: AppFilterProps) => {
+    const targetRevisionOptions = React.useMemo(
+        () => optionsFrom(props.facets.revisions, props.pref.targetRevisionFilter),
+        [props.facets.revisions, props.pref.targetRevisionFilter]
+    );
+    return (
+        <Filter
+            label='TARGET REVISION'
+            selected={props.pref.targetRevisionFilter}
+            setSelected={s => props.onChange({...props.pref, targetRevisionFilter: s})}
+            field={true}
+            options={targetRevisionOptions}
+        />
+    );
+};
+
+const RepoFilter = React.memo((props: AppFilterProps) => {
+    const repoOptions = React.useMemo(() => optionsFrom(props.facets.repos, props.pref.reposFilter), [props.facets.repos, props.pref.reposFilter]);
+    return <Filter label='REPOSITORIES' selected={props.pref.reposFilter} setSelected={s => props.onChange({...props.pref, reposFilter: s})} field={true} options={repoOptions} />;
+});
+
+const FavoriteFilter = (props: {value: boolean; onChange: (showFavorites: boolean) => void}) => {
+    const onChange = (val: boolean) => {
+        props.onChange(val);
+    };
+    return (
+        <div
+            className={`filter filter__item ${props.value ? 'filter__item--selected' : ''}`}
+            style={{margin: '0.5em 0', marginTop: '0.5em'}}
+            onClick={() => onChange(!props.value)}>
+            <Checkbox
+                value={!!props.value}
+                onChange={onChange}
+                style={{
+                    marginRight: '8px'
+                }}
+            />
+            <div style={{marginRight: '5px', textAlign: 'center', width: '25px'}}>
+                <i style={{color: '#FFCE25'}} className='fas fa-star' />
+            </div>
+            <div className='filter__item__label'>Favorites Only</div>
+        </div>
+    );
+};
+
+function getAutoSyncOptions(counts: StatusCounts) {
+    return [
+        {
+            label: 'Enabled',
+            icon: <i className='fa fa-circle-play' style={{color: COLORS.sync.synced}} />,
+            count: counts.Enabled || 0
+        },
+        {
+            label: 'Disabled',
+            icon: <i className='fa fa-ban' style={{color: COLORS.sync.out_of_sync}} />,
+            count: counts.Disabled || 0
         }
-        return `${cluster.name} (${cluster.server})`;
-    }
+    ];
 }
+
+const AutoSyncFilter = (props: AppFilterProps) => (
+    <Filter
+        label='AUTO SYNC'
+        selected={props.pref.autoSyncFilter}
+        setSelected={s => props.onChange({...props.pref, autoSyncFilter: s})}
+        options={getAutoSyncOptions(props.facets.totalByAutoSyncStatus)}
+        collapsed={props.collapsed || false}
+    />
+);
+
+function getOperationOptions(totals: StatusCounts) {
+    const counts = (title: OperationStateTitle) => totals[title] || 0;
+
+    /**
+     * Combine syncing, terminated (terminating), and deleting counts into a single count for syncing status.
+     * Deleting and Terminating are considered syncing statuses. Terminating operations will always end in a
+     * failed or error state.
+     */
+    const combinedSyncingCount = counts(OperationStateTitles.Syncing) + counts(OperationStateTitles.Terminated) + counts(OperationStateTitles.Deleting);
+
+    return [
+        {
+            label: OperationStateTitles.Syncing,
+            icon: <i className='fa fa-circle-notch' style={{color: COLORS.operation.running}} />,
+            count: combinedSyncingCount
+        },
+        {
+            label: OperationStateTitles.SyncOK,
+            icon: <i className='fa fa-check-circle' style={{color: COLORS.operation.success}} />,
+            count: counts(OperationStateTitles.SyncOK)
+        },
+        {
+            label: OperationStateTitles.SyncError,
+            icon: <i className='fa fa-exclamation-circle' style={{color: COLORS.operation.error}} />,
+            count: counts(OperationStateTitles.SyncError)
+        },
+        {
+            label: OperationStateTitles.SyncFailed,
+            icon: <i className='fa fa-times-circle' style={{color: COLORS.operation.failed}} />,
+            count: counts(OperationStateTitles.SyncFailed)
+        },
+        {
+            label: OperationStateTitles.Unknown,
+            icon: <i className='fa fa-question-circle' style={{color: COLORS.health.unknown}} />,
+            count: counts(OperationStateTitles.Unknown)
+        }
+    ];
+}
+
+const OperationFilter = (props: AppFilterProps) => (
+    <Filter
+        label='OPERATION STATUS'
+        selected={props.pref.operationFilter}
+        setSelected={s => props.onChange({...props.pref, operationFilter: s})}
+        options={getOperationOptions(props.facets.totalByOperationStatus)}
+        collapsed={props.collapsed || false}
+    />
+);
+
+export const ApplicationsFilter = (props: AppFilterProps) => {
+    const appliedFilter = [
+        ...(props.pref.syncFilter || []),
+        ...(props.pref.healthFilter || []),
+        ...(props.hydratorEnabled ? props.pref.hydrationFilter || [] : []),
+        ...(props.pref.operationFilter || []),
+        ...(props.pref.labelsFilter || []),
+        ...(props.pref.annotationsFilter || []),
+        ...(props.pref.projectsFilter || []),
+        ...(props.pref.clustersFilter || []),
+        ...(props.pref.namespacesFilter || []),
+        ...(props.pref.reposFilter || []),
+        ...(props.pref.targetRevisionFilter || []),
+        ...(props.pref.autoSyncFilter || []),
+        ...(props.pref.showFavorites ? ['favorites'] : [])
+    ];
+
+    const onClearFilter = () => {
+        const newPref: AppsListPreferences = {...props.pref};
+        AppsListPreferences.clearFilters(newPref);
+        props.onChange(newPref);
+    };
+
+    return (
+        <FiltersGroup title='Application filters' content={props.children} appliedFilter={appliedFilter} onClearFilter={onClearFilter} collapsed={props.collapsed}>
+            <FavoriteFilter value={!!props.pref.showFavorites} onChange={val => props.onChange({...props.pref, showFavorites: val})} />
+            <AppHealthFilter {...props} />
+            <SyncFilter {...props} />
+            {props.hydratorEnabled && <HydrationFilter {...props} />}
+            <OperationFilter {...props} />
+            <MetadataFilter
+                label='LABELS'
+                values={props.facets.labels}
+                selected={props.pref.labelsFilter}
+                onChange={labelsFilter => props.onChange({...props.pref, labelsFilter})}
+            />
+            <MetadataFilter
+                label='ANNOTATIONS'
+                values={props.facets.annotations}
+                selected={props.pref.annotationsFilter}
+                onChange={annotationsFilter => props.onChange({...props.pref, annotationsFilter})}
+            />
+            <ProjectFilter {...props} />
+            <ClusterFilter {...props} />
+            <NamespaceFilter {...props} />
+            <RepoFilter {...props} />
+            <TargetRevisionFilter {...props} />
+            <AutoSyncFilter {...props} collapsed={true} />
+        </FiltersGroup>
+    );
+};
+
+export const AppSetsFilter = (props: AppSetFilterProps) => {
+    const labels = React.useMemo(() => collectMetadataValues(props.apps, 'labels'), [props.apps]);
+    const appliedFilter = [...(props.pref.healthFilter || []), ...(props.pref.labelsFilter || []), ...(props.pref.showFavorites ? ['favorites'] : [])];
+
+    const onClearFilter = () => {
+        const newPref: AppSetsListPreferences = {...props.pref};
+        AppSetsListPreferences.clearFilters(newPref);
+        props.onChange(newPref);
+    };
+
+    return (
+        <FiltersGroup title='ApplicationSet filters' content={props.children} appliedFilter={appliedFilter} onClearFilter={onClearFilter} collapsed={props.collapsed}>
+            <FavoriteFilter value={!!props.pref.showFavorites} onChange={val => props.onChange({...props.pref, showFavorites: val})} />
+            <AppSetHealthFilter {...props} />
+            <MetadataFilter label='LABELS' values={labels} selected={props.pref.labelsFilter} onChange={labelsFilter => props.onChange({...props.pref, labelsFilter})} />
+        </FiltersGroup>
+    );
+};

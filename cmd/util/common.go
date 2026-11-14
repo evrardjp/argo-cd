@@ -1,13 +1,7 @@
 package util
 
 import (
-	"encoding/json"
-	"fmt"
-
-	"github.com/ghodss/yaml"
-	v1 "k8s.io/api/core/v1"
-
-	"github.com/argoproj/gitops-engine/pkg/utils/kube"
+	stderrors "errors"
 )
 
 var (
@@ -15,71 +9,41 @@ var (
 	LogLevel  string
 )
 
-// PrintResource prints a single resource in YAML or JSON format to stdout according to the output format
-func PrintResources(resources []interface{}, output string) error {
-	for i, resource := range resources {
-		filteredResource, err := omitFields(resource)
-		if err != nil {
+func ValidateBearerTokenForHTTPSRepoOnly(bearerToken string, isHTTPS bool) error {
+	// Bearer token is only valid for HTTPS repositories
+	if bearerToken != "" {
+		if !isHTTPS {
+			err := stderrors.New("--bearer-token is only supported for HTTPS repositories")
 			return err
 		}
-		resources[i] = filteredResource
-	}
-	var obj interface{} = resources
-	if len(resources) == 1 {
-		obj = resources[0]
-	}
-
-	switch output {
-	case "json":
-		jsonBytes, err := json.MarshalIndent(obj, "", "  ")
-		if err != nil {
-			return err
-		}
-
-		fmt.Println(string(jsonBytes))
-	case "yaml":
-		yamlBytes, err := yaml.Marshal(obj)
-		if err != nil {
-			return err
-		}
-		// marshaled YAML already ends with the new line character
-		fmt.Print(string(yamlBytes))
-	default:
-		return fmt.Errorf("unknown output format: %s", output)
 	}
 	return nil
 }
 
-// omit fields such as status, creationTimestamp and metadata.namespace in k8s objects
-func omitFields(resource interface{}) (interface{}, error) {
-	jsonBytes, err := json.Marshal(resource)
-	if err != nil {
-		return nil, err
+func ValidateBearerTokenForGitOnly(bearerToken string, repoType string) error {
+	// Bearer token is only valid for Git repositories
+	if bearerToken != "" && repoType != "git" {
+		err := stderrors.New("--bearer-token is only supported for Git repositories")
+		return err
 	}
-
-	toMap := make(map[string]interface{})
-	err = json.Unmarshal([]byte(string(jsonBytes)), &toMap)
-	if err != nil {
-		return nil, err
-	}
-
-	delete(toMap, "status")
-	if v, ok := toMap["metadata"]; ok {
-		if metadata, ok := v.(map[string]interface{}); ok {
-			delete(metadata, "creationTimestamp")
-			delete(metadata, "namespace")
-		}
-	}
-	return toMap, nil
+	return nil
 }
 
-// ConvertSecretData converts kubernetes secret's data to stringData
-func ConvertSecretData(secret *v1.Secret) {
-	secret.Kind = kube.SecretKind
-	secret.APIVersion = "v1"
-	secret.StringData = map[string]string{}
-	for k, v := range secret.Data {
-		secret.StringData[k] = string(v)
+func ValidateBearerTokenAndPasswordCombo(bearerToken string, password string) error {
+	// Either the password or the bearer token must be set, but not both
+	if bearerToken != "" && password != "" {
+		err := stderrors.New("only --bearer-token or --password is allowed, not both")
+		return err
 	}
-	secret.Data = map[string][]byte{}
+	return nil
+}
+
+// ValidateInsecureOCIForceHTTP returns an error if --insecure-oci-force-http is set
+// on a repo that is not OCI-capable. Only type=oci repos, or type=helm repos with
+// --enable-oci, are OCI-capable; --enable-oci is meaningful only for helm repos.
+func ValidateInsecureOCIForceHTTP(insecureOCIForceHTTP bool, repoType string, enableOCI bool) error {
+	if insecureOCIForceHTTP && repoType != "oci" && (repoType != "helm" || !enableOCI) {
+		return stderrors.New("--insecure-oci-force-http requires --type oci or --enable-oci")
+	}
+	return nil
 }

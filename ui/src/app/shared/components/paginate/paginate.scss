@@ -2,8 +2,6 @@
 
 .paginate {
     position: relative;
-    height: 25px;
-
 
     @media (max-width: map-get($breakpoints, medium)) {
         & {
@@ -23,15 +21,29 @@
     }
 
     &__paginator {
-        ul {
-            display: inline-block;
-            margin: 0;
-            padding: 0;
-        }
+        display: inline-block;
+        padding: 0;
+        margin-bottom: 0;
+        margin-left: 0;
+        font-variant-numeric: tabular-nums;
+        user-select: none;
 
         li {
             display: inline-block;
-            margin-right: 1em;
+            margin-right: 0.6em;
+        }
+    }
+
+    &__page-link,
+    &__break-link {
+        display: inline-block;
+        min-width: var(--paginate-page-min-width, 2ch);
+        text-align: center;
+    }
+
+    li.break {
+        a {
+            cursor: pointer;
         }
     }
 
@@ -50,11 +62,11 @@
     }
 
     &__size-menu {
-        position: absolute;
-        z-index: 1;
-        right: 0;
-        top: 50%;
-        transform: translateY(-50%);
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 1em;
+
         li {
             display: block;
         }

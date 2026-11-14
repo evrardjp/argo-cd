@@ -1,96 +1,161 @@
-import {DropDownMenu} from 'argo-ui';
+import {DataLoader} from 'argo-ui';
 import * as React from 'react';
-import {Key, KeybindingContext, useNav} from 'react-keyhooks';
-import {Cluster} from '../../../shared/components';
-import {Consumer} from '../../../shared/context';
+import {Key, KeybindingContext, useNav} from 'argo-ui/v2';
+import AutoSizer from 'react-virtualized/dist/commonjs/AutoSizer';
+import List from 'react-virtualized/dist/commonjs/List';
+import WindowScroller from 'react-virtualized/dist/commonjs/WindowScroller';
+import type {ListRowProps} from 'react-virtualized';
+import {Consumer, Context} from '../../../shared/context';
 import * as models from '../../../shared/models';
-import {ApplicationURLs} from '../application-urls';
 import * as AppUtils from '../utils';
-import {OperationState} from '../utils';
-require('./applications-table.scss');
+import {isApp} from '../utils';
+import {services} from '../../../shared/services';
+import {ApplicationTableRow} from './application-table-row';
+import {AppSetTableRow} from './appset-table-row';
+import {
+    appsLayoutKey,
+    bidirectionalOverscanIndicesGetter,
+    computeOverscanRowCount,
+    getTableRowHeight,
+    shouldUseVirtualScroll,
+    TABLE_OVERSCAN_ROW_COUNT,
+    TABLE_ROW_HEIGHT,
+    useWindowScrollerPosition
+} from './virtual-scroll';
+
+import './applications-table.scss';
 
 export const ApplicationsTable = (props: {
-    applications: models.Application[];
-    syncApplication: (appName: string) => any;
-    refreshApplication: (appName: string) => any;
-    deleteApplication: (appName: string) => any;
+    applications: models.AbstractApplication[];
+    syncApplication: (appName: string, appNamespace: string) => any;
+    refreshApplication: (appName: string, appNamespace: string) => any;
+    deleteApplication: (appName: string, appNamespace: string) => any;
+    useVirtualScrolling?: boolean;
+    statusBarVisible?: boolean;
 }) => {
     const [selectedApp, navApp, reset] = useNav(props.applications.length);
+    const ctxh = React.useContext(Context);
+    const listRef = React.useRef<List>(null);
+    const windowScrollerRef = React.useRef<WindowScroller>(null);
+    const shouldVirtualize = shouldUseVirtualScroll(props.useVirtualScrolling, props.applications.length);
 
-    const {useKeybinding} = React.useContext(KeybindingContext);
+    const {registerKeybinding} = React.useContext(KeybindingContext);
 
-    useKeybinding(Key.DOWN, () => navApp(1));
-    useKeybinding(Key.UP, () => navApp(-1));
-    useKeybinding(Key.ESCAPE, () => {
-        reset();
-        return selectedApp > -1 ? true : false;
+    registerKeybinding({keys: Key.DOWN, action: () => navApp(1)});
+    registerKeybinding({keys: Key.UP, action: () => navApp(-1)});
+    registerKeybinding({
+        keys: Key.ESCAPE,
+        action: () => {
+            reset();
+            return selectedApp > -1 ? true : false;
+        }
     });
+    registerKeybinding({
+        keys: Key.ENTER,
+        action: () => {
+            if (selectedApp > -1) {
+                ctxh.navigation.goto(`/${AppUtils.getAppUrl(props.applications[selectedApp])}`);
+                return true;
+            }
+            return false;
+        }
+    });
+
+    React.useEffect(() => {
+        if (selectedApp >= props.applications.length) {
+            reset();
+        }
+    }, [selectedApp, props.applications.length, reset]);
+
+    React.useEffect(() => {
+        if (selectedApp >= 0 && shouldVirtualize && listRef.current) {
+            listRef.current.scrollToRow(selectedApp);
+        }
+    }, [selectedApp, shouldVirtualize]);
+
+    const getRowHeight = React.useCallback(
+        ({index}: {index: number}) => {
+            const app = props.applications[index];
+            return app ? getTableRowHeight(app) : TABLE_ROW_HEIGHT;
+        },
+        [props.applications]
+    );
+
+    const layoutKey = React.useMemo(() => (shouldVirtualize ? appsLayoutKey(props.applications) : ''), [shouldVirtualize, props.applications]);
+    useWindowScrollerPosition(windowScrollerRef, shouldVirtualize, `${layoutKey}:${!!props.statusBarVisible}`);
+
+    // Recalculate row heights after sort/reorder or when a hydrator status line appears/disappears.
+    React.useEffect(() => {
+        if (shouldVirtualize && listRef.current) {
+            listRef.current.recomputeRowHeights();
+        }
+    }, [shouldVirtualize, layoutKey]);
 
     return (
         <Consumer>
             {ctx => (
-                <div className='applications-table argo-table-list argo-table-list--clickable'>
-                    {props.applications.map((app, i) => (
-                        <div
-                            key={app.metadata.name}
-                            className={`argo-table-list__row
-                applications-list__entry applications-list__entry--comparison-${app.status.sync.status}
-                applications-list__entry--health-${app.status.health.status} ${selectedApp === i ? 'applications-tiles__selected' : ''}`}>
-                            <div className={`row applications-list__table-row`} onClick={e => ctx.navigation.goto(`/applications/${app.metadata.name}`, {}, {event: e})}>
-                                <div className='columns small-4'>
-                                    <div className='row'>
-                                        <div className='show-for-xxlarge columns small-3'>Project:</div>
-                                        <div className='columns small-12 xxlarge-9'>{app.spec.project}</div>
+                <DataLoader load={() => services.viewPreferences.getPreferences()}>
+                    {pref => {
+                        const renderRow = (app: models.AbstractApplication, i: number) =>
+                            isApp(app) ? (
+                                <ApplicationTableRow
+                                    key={AppUtils.appInstanceName(app)}
+                                    app={app as models.Application}
+                                    selected={selectedApp === i}
+                                    pref={pref}
+                                    ctx={ctx}
+                                    syncApplication={props.syncApplication}
+                                    refreshApplication={props.refreshApplication}
+                                    deleteApplication={props.deleteApplication}
+                                />
+                            ) : (
+                                <AppSetTableRow key={AppUtils.appInstanceName(app)} appSet={app as models.ApplicationSet} selected={selectedApp === i} pref={pref} ctx={ctx} />
+                            );
+
+                        if (shouldVirtualize) {
+                            const rowRenderer = ({index, key, style}: ListRowProps) => {
+                                const app = props.applications[index];
+                                if (!app) {
+                                    return null;
+                                }
+                                return (
+                                    <div key={key} style={style} className='applications-table__virtual-row'>
+                                        {renderRow(app, index)}
                                     </div>
-                                    <div className='row'>
-                                        <div className='show-for-xxlarge columns small-3'>Name:</div>
-                                        <div className='columns small-12 xxlarge-9'>
-                                            {app.metadata.name} <ApplicationURLs urls={app.status.summary.externalURLs} />
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className='columns small-6'>
-                                    <div className='row'>
-                                        <div className='show-for-xxlarge columns small-2'>Source:</div>
-                                        <div className='columns small-12 xxlarge-10' style={{position: 'relative'}}>
-                                            {app.spec.source.repoURL}/{app.spec.source.path || app.spec.source.chart}
-                                            <div className='applications-table__meta'>
-                                                <span>{app.spec.source.targetRevision || 'HEAD'}</span>
-                                                {Object.keys(app.metadata.labels || {}).map(label => (
-                                                    <span key={label}>{`${label}=${app.metadata.labels[label]}`}</span>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className='row'>
-                                        <div className='show-for-xxlarge columns small-2'>Destination:</div>
-                                        <div className='columns small-12 xxlarge-10'>
-                                            <Cluster server={app.spec.destination.server} name={app.spec.destination.name} />/{app.spec.destination.namespace}
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className='columns small-2'>
-                                    <AppUtils.HealthStatusIcon state={app.status.health} /> <span>{app.status.health.status}</span>
-                                    <br />
-                                    <AppUtils.ComparisonStatusIcon status={app.status.sync.status} />
-                                    <span>{app.status.sync.status}</span> <OperationState app={app} quiet={true} />
-                                    <DropDownMenu
-                                        anchor={() => (
-                                            <button className='argo-button argo-button--light argo-button--lg argo-button--short'>
-                                                <i className='fa fa-ellipsis-v' />
-                                            </button>
+                                );
+                            };
+
+                            return (
+                                <div className='applications-table argo-table-list argo-table-list--clickable'>
+                                    <WindowScroller ref={windowScrollerRef} updateScrollTopOnUpdatePosition={true}>
+                                        {({height, isScrolling, onChildScroll, scrollTop}) => (
+                                            <AutoSizer disableHeight={true}>
+                                                {({width}) => (
+                                                    <List
+                                                        ref={listRef}
+                                                        autoHeight={true}
+                                                        height={height}
+                                                        width={width}
+                                                        isScrolling={isScrolling}
+                                                        onScroll={onChildScroll}
+                                                        scrollTop={scrollTop}
+                                                        rowCount={props.applications.length}
+                                                        rowHeight={getRowHeight}
+                                                        rowRenderer={rowRenderer}
+                                                        overscanRowCount={computeOverscanRowCount(height, TABLE_ROW_HEIGHT, TABLE_OVERSCAN_ROW_COUNT)}
+                                                        overscanIndicesGetter={bidirectionalOverscanIndicesGetter}
+                                                    />
+                                                )}
+                                            </AutoSizer>
                                         )}
-                                        items={[
-                                            {title: 'Sync', action: () => props.syncApplication(app.metadata.name)},
-                                            {title: 'Refresh', action: () => props.refreshApplication(app.metadata.name)},
-                                            {title: 'Delete', action: () => props.deleteApplication(app.metadata.name)}
-                                        ]}
-                                    />
+                                    </WindowScroller>
                                 </div>
-                            </div>
-                        </div>
-                    ))}
-                </div>
+                            );
+                        }
+
+                        return <div className='applications-table argo-table-list argo-table-list--clickable'>{props.applications.map((app, i) => renderRow(app, i))}</div>;
+                    }}
+                </DataLoader>
             )}
         </Consumer>
     );

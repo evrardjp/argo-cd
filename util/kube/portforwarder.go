@@ -4,22 +4,43 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
 
-	"github.com/pkg/errors"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
+	cmdutil "k8s.io/kubectl/pkg/cmd/util"
+	"k8s.io/kubectl/pkg/util/podutils"
+	"k8s.io/streaming/pkg/httpstream"
 
-	"github.com/argoproj/argo-cd/v2/util/io"
+	utilio "github.com/argoproj/argo-cd/v3/util/io"
 )
 
-func PortForward(podSelector string, targetPort int, namespace string, overrides *clientcmd.ConfigOverrides) (int, error) {
+func selectPodForPortForward(clientSet kubernetes.Interface, namespace string, podSelectors ...string) (*corev1.Pod, error) {
+	for _, podSelector := range podSelectors {
+		pods, err := clientSet.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
+			LabelSelector: podSelector,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, po := range pods.Items {
+			if po.Status.Phase == corev1.PodRunning && podutils.IsPodReady(&po) {
+				return &po, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("cannot find ready pod with selector: %v - use the --{component}-name flag in this command or set the environmental variable (Refer to https://argo-cd.readthedocs.io/en/stable/user-guide/environment-variables), to change the Argo CD component name in the CLI", podSelectors)
+}
+
+func PortForward(targetPort int, namespace string, overrides *clientcmd.ConfigOverrides, podSelectors ...string) (int, error) {
+	ctx := context.Background()
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	loadingRules.DefaultClientConfig = &clientcmd.DefaultClientConfig
 	clientConfig := clientcmd.NewInteractiveDeferredLoadingClientConfig(loadingRules, overrides, os.Stdin)
@@ -40,41 +61,48 @@ func PortForward(podSelector string, targetPort int, namespace string, overrides
 		return -1, err
 	}
 
-	pods, err := clientSet.CoreV1().Pods(namespace).List(context.Background(), v1.ListOptions{
-		LabelSelector: podSelector,
-	})
+	pod, err := selectPodForPortForward(clientSet, namespace, podSelectors...)
 	if err != nil {
 		return -1, err
-	}
-
-	if len(pods.Items) == 0 {
-		return -1, fmt.Errorf("cannot find %s pod", podSelector)
 	}
 
 	url := clientSet.CoreV1().RESTClient().Post().
 		Resource("pods").
-		Namespace(pods.Items[0].Namespace).
-		Name(pods.Items[0].Name).
+		Namespace(pod.Namespace).
+		Name(pod.Name).
 		SubResource("portforward").URL()
 
 	transport, upgrader, err := spdy.RoundTripperFor(config)
 	if err != nil {
-		return -1, errors.Wrap(err, "Could not create round tripper")
+		return -1, fmt.Errorf("could not create round tripper: %w", err)
 	}
 	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", url)
 
+	// Reuse environment variable for kubectl to disable the feature flag, default is enabled.
+	if !cmdutil.PortForwardWebsockets.IsDisabled() {
+		tunnelingDialer, err := portforward.NewSPDYOverWebsocketDialer(url, config)
+		if err != nil {
+			return -1, fmt.Errorf("could not create tunneling dialer: %w", err)
+		}
+		// First attempt tunneling (websocket) dialer, then fallback to spdy dialer.
+		dialer = portforward.NewFallbackDialer(tunnelingDialer, dialer, func(err error) bool {
+			return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+		})
+	}
+
 	readyChan := make(chan struct{}, 1)
+	failedChan := make(chan error, 1)
 	out := new(bytes.Buffer)
 	errOut := new(bytes.Buffer)
+	lc := &net.ListenConfig{}
 
-	ln, err := net.Listen("tcp", "[::]:0")
+	ln, err := lc.Listen(ctx, "tcp", "localhost:0")
 	if err != nil {
 		return -1, err
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	io.Close(ln)
-
-	forwarder, err := portforward.New(dialer, []string{fmt.Sprintf("%d:%d", port, targetPort)}, context.Background().Done(), readyChan, out, errOut)
+	utilio.Close(ln)
+	forwarder, err := portforward.NewOnAddresses(dialer, []string{"localhost"}, []string{fmt.Sprintf("%d:%d", port, targetPort)}, context.Background().Done(), readyChan, out, errOut)
 	if err != nil {
 		return -1, err
 	}
@@ -82,13 +110,16 @@ func PortForward(podSelector string, targetPort int, namespace string, overrides
 	go func() {
 		err = forwarder.ForwardPorts()
 		if err != nil {
-			log.Fatal(err)
+			failedChan <- err
 		}
 	}()
-	for range readyChan {
+	select {
+	case err = <-failedChan:
+		return -1, err
+	case <-readyChan:
 	}
-	if len(errOut.String()) != 0 {
-		return -1, fmt.Errorf(errOut.String())
+	if errOut.String() != "" {
+		return -1, fmt.Errorf("%s", errOut.String())
 	}
 	return port, nil
 }

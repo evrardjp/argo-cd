@@ -1,6 +1,6 @@
 import {FormField} from 'argo-ui';
 import * as React from 'react';
-import {Form, FormApi, Text} from 'react-form';
+import {Form, FormApi, Text} from 'argo-ui';
 
 import * as models from '../../../shared/models';
 import {CreateJWTTokenParams, DeleteJWTTokenParams, ProjectRoleParams} from '../../../shared/services';
@@ -19,8 +19,8 @@ interface ProjectRoleDefaultParams {
 interface ProjectRoleEditPanelProps {
     nameReadonly?: boolean;
     submit: (params: ProjectRoleParams) => any;
-    createJWTToken: (params: CreateJWTTokenParams) => void;
-    deleteJWTToken: (params: DeleteJWTTokenParams) => void;
+    createJWTToken: (params: CreateJWTTokenParams) => Promise<void>;
+    deleteJWTToken: (params: DeleteJWTTokenParams) => Promise<void>;
     hideJWTToken: () => void;
     token: string;
     getApi?: (formApi: FormApi) => void;
@@ -42,31 +42,38 @@ export const ProjectRoleEditPanel = (props: ProjectRoleEditPanelProps) => {
                     groups: (props.defaultParams.role && props.defaultParams.role.groups) || []
                 }}
                 validateError={(params: ProjectRoleParams) => ({
-                    projName: !params.projName && 'Project name is required',
-                    roleName: !params.roleName && 'Role name is required'
+                    projName: !params.projName && 'Project Name is required',
+                    roleName: !params.roleName && 'Role Name is required'
                 })}>
                 {api => (
                     <form onSubmit={api.submitForm} role='form' className='width-control'>
-                        <div className='argo-form-row'>
-                            <FormField formApi={api} label='Role Name' componentProps={{readOnly: props.nameReadonly}} field='roleName' component={Text} />
+                        <div className='white-box'>
+                            <p>GENERAL</p>
+                            <div className='argo-form-row'>
+                                <FormField formApi={api} label='Role Name' componentProps={{readOnly: props.nameReadonly}} field='roleName' component={Text} />
+                            </div>
+                            <div className='argo-form-row'>
+                                <FormField formApi={api} label='Role Description' field='description' component={Text} />
+                            </div>
                         </div>
-                        <div className='argo-form-row'>
-                            <FormField formApi={api} label='Role Description' field='description' component={Text} />
+                        <div className='white-box'>
+                            <ProjectRolePoliciesEdit
+                                projName={api.values.projName}
+                                roleName={api.values.roleName}
+                                formApi={api}
+                                policies={api.values.policies}
+                                newRole={props.defaultParams.newRole}
+                            />
                         </div>
-                        <ProjectRolePoliciesEdit
-                            projName={api.values.projName}
-                            roleName={api.values.roleName}
-                            formApi={api}
-                            policies={api.values.policies}
-                            newRole={props.defaultParams.newRole}
-                        />
-                        <ProjectRoleGroupsEdit
-                            projName={api.values.projName}
-                            roleName={api.values.roleName}
-                            formApi={api}
-                            groups={api.values.groups}
-                            newRole={props.defaultParams.newRole}
-                        />
+                        <div className='white-box'>
+                            <ProjectRoleGroupsEdit
+                                projName={api.values.projName}
+                                roleName={api.values.roleName}
+                                formApi={api}
+                                groups={api.values.groups}
+                                newRole={props.defaultParams.newRole}
+                            />
+                        </div>
                     </form>
                 )}
             </Form>

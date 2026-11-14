@@ -1,6 +1,6 @@
 import {FormField, FormSelect} from 'argo-ui';
 import * as React from 'react';
-import {Form, FormApi, Text} from 'react-form';
+import {Form, FormApi, Text} from 'argo-ui';
 
 import {CheckboxField} from '../../../shared/components';
 
@@ -13,6 +13,8 @@ import {
     ProjectSyncWindowNamespaceEdit,
     ProjectSyncWindowScheduleEdit
 } from '../project-sync-windows-edit/project-sync-windows-edit';
+
+import timezones from 'timezones-list';
 
 interface ProjectSyncWindowsDefaultParams {
     projName: string;
@@ -28,12 +30,12 @@ interface ProjectSyncWindowsEditPanelProps {
 }
 
 export const ProjectSyncWindowsEditPanel = (props: ProjectSyncWindowsEditPanelProps) => {
-    if (props.defaultParams.window === undefined) {
-        const w = {
-            schedule: '* * * * *'
-        } as models.SyncWindow;
-        props.defaultParams.window = w;
-    }
+    const window =
+        props.defaultParams.window === undefined
+            ? ({
+                  schedule: '* * * * *'
+              } as models.SyncWindow)
+            : props.defaultParams.window;
     return (
         <div className='project-sync-windows-edit-panel'>
             <Form
@@ -41,7 +43,7 @@ export const ProjectSyncWindowsEditPanel = (props: ProjectSyncWindowsEditPanelPr
                 getApi={props.getApi}
                 defaultValues={{
                     projName: props.defaultParams.projName,
-                    window: props.defaultParams.window
+                    window
                 }}
                 validateError={(params: ProjectSyncWindowsParams) => ({
                     projName: !params.projName && 'Project name is required',
@@ -49,22 +51,58 @@ export const ProjectSyncWindowsEditPanel = (props: ProjectSyncWindowsEditPanelPr
                 })}>
                 {api => (
                     <form onSubmit={api.submitForm} role='form' className='width-control'>
-                        <div className='argo-form-row'>
-                            <FormField formApi={api} label='Kind' componentProps={{options: ['allow', 'deny']}} field='window.kind' component={FormSelect} />
+                        <div className='white-box'>
+                            <p>GENERAL</p>
+                            <div className='argo-form-row'>
+                                <FormField formApi={api} label='Kind' field='window.kind' component={FormSelect} componentProps={{options: ['allow', 'deny']}} />
+                            </div>
+                            <ProjectSyncWindowScheduleEdit projName={api.values.projName} window={api.values.window} formApi={api} />
+                            <br />
+                            <div className='argo-form-row'>
+                                <FormField formApi={api} label='Time Zone' componentProps={{options: generateTimezones()}} field='window.timeZone' component={FormSelect} />
+                            </div>
+                            <div className='argo-form-row'>
+                                <FormField formApi={api} label='Duration (e.g. "30m" or "1h")' field='window.duration' component={Text} />
+                            </div>
+                            <div className='argo-form-row'>
+                                <FormField formApi={api} label='Enable manual sync' field='window.manualSync' component={CheckboxField} />
+                            </div>
+                            <div className='argo-form-row'>
+                                <FormField formApi={api} label='Enable sync overrun' field='window.syncOverrun' component={CheckboxField} />
+                            </div>
+                            <div className='argo-form-row'>
+                                <FormField
+                                    formApi={api}
+                                    label='Use AND operator while selecting the apps that match the configured selectors(applications, namespaces and clusters)'
+                                    field='window.andOperator'
+                                    component={CheckboxField}
+                                />
+                            </div>
+                            <div className='argo-form-row'>
+                                <FormField formApi={api} label='Description' field='window.description' component={Text} />
+                            </div>
                         </div>
-                        <ProjectSyncWindowScheduleEdit projName={api.values.projName} window={api.values.window} formApi={api} />
-                        <div className='argo-form-row'>
-                            <FormField formApi={api} label='Duration (e.g. "30m" or "1h")' field='window.duration' component={Text} />
+                        <div className='white-box'>
+                            <ProjectSyncWindowApplicationsEdit projName={api.values.projName} window={api.values.window} formApi={api} />
                         </div>
-                        <div className='argo-form-row'>
-                            <FormField formApi={api} label='Enable manual sync' field='window.manualSync' component={CheckboxField} />
+                        <div className='white-box'>
+                            <ProjectSyncWindowNamespaceEdit projName={api.values.projName} window={api.values.window} formApi={api} />
                         </div>
-                        <ProjectSyncWindowApplicationsEdit projName={api.values.projName} window={api.values.window} formApi={api} />
-                        <ProjectSyncWindowNamespaceEdit projName={api.values.projName} window={api.values.window} formApi={api} />
-                        <ProjectSyncWindowClusterEdit projName={api.values.projName} window={api.values.window} formApi={api} />
+                        <div className='white-box'>
+                            <ProjectSyncWindowClusterEdit projName={api.values.projName} window={api.values.window} formApi={api} />
+                        </div>
                     </form>
                 )}
             </Form>
         </div>
     );
+
+    function generateTimezones(): string[] {
+        const zones: string[] = [];
+        for (const tz of timezones) {
+            zones.push(tz.tzCode);
+        }
+        zones.sort();
+        return zones;
+    }
 };
